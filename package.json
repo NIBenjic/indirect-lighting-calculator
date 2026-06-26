@@ -1,0 +1,17 @@
+{
+  "name": "indirect-lighting-simulator",
+  "version": "1.0.0",
+  "description": "間接照明模擬器",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 3000 --host",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "three": "^0.168.0"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0"
+  }
+}
