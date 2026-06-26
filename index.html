@@ -141,6 +141,56 @@
       cursor: pointer;
     }
     .select-input:focus { border-color: #4fc3f7; }
+    .text-area {
+      width: 100%; box-sizing: border-box;
+      background: #1a1a1a; border: 1px solid #333; color: #cfd2d6;
+      font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      padding: 5px 6px; border-radius: 4px; outline: none; resize: vertical;
+    }
+    .text-area:focus { border-color: #4fc3f7; }
+    .btn-row { display: flex; gap: 6px; margin: 6px 0; }
+    .btn {
+      flex: 1; background: #2a2f36; border: 1px solid #3a4048; color: #cfd2d6;
+      font-size: 11px; padding: 5px 8px; border-radius: 4px; cursor: pointer;
+    }
+    .btn:hover { border-color: #4fc3f7; color: #fff; }
+    .hint { font-size: 10px; color: #7c858d; margin-top: 4px; line-height: 1.4; }
+    .hint.error { color: #ff8a8a; }
+    .hint.ok { color: #7dd87d; }
+    /* ── 燈槽形式編輯器 ── */
+    .btn-row.wrap { flex-wrap: wrap; }
+    .tmpl-btn { flex: 0 0 auto; }
+    .num-input {
+      width: 64px; background: #1a1a1a; border: 1px solid #333; color: #cfd2d6;
+      font-size: 11px; padding: 2px 5px; border-radius: 4px; outline: none; text-align: right;
+    }
+    .num-input.sm { width: 56px; }
+    .num-input:focus { border-color: #4fc3f7; }
+    .text-input {
+      flex: 1; min-width: 0; background: #1a1a1a; border: 1px solid #333; color: #cfd2d6;
+      font-size: 11px; padding: 2px 6px; border-radius: 4px; outline: none;
+    }
+    .text-input:focus { border-color: #4fc3f7; }
+    .unit-label { font-size: 10px; color: #7c858d; width: 22px; }
+    .el-list { display: flex; flex-direction: column; gap: 3px; margin: 4px 0; }
+    .el-row {
+      display: flex; align-items: center; gap: 2px; padding: 2px 4px;
+      background: #181b20; border: 1px solid #262b31; border-radius: 4px;
+    }
+    .el-row.sel { border-color: #4fc3f7; background: #14222b; }
+    .el-name { flex: 1; min-width: 0; font-size: 11px; color: #cfd2d6; cursor: pointer;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .el-btn {
+      background: transparent; border: none; color: #8a949c; cursor: pointer;
+      font-size: 11px; padding: 1px 4px; border-radius: 3px; line-height: 1.4;
+    }
+    .el-btn:hover { color: #fff; background: #2a3138; }
+    .pt-table { display: flex; flex-direction: column; gap: 2px; margin: 4px 0; max-height: 168px; overflow-y: auto; }
+    .pt-row { display: flex; align-items: center; gap: 4px; }
+    .pt-row.pt-head { color: #7c858d; font-size: 9px; }
+    .pt-idx { width: 16px; text-align: right; font-size: 10px; color: #7c858d; }
+    .pt-h { width: 56px; font-size: 9px; color: #7c858d; }
+    .pt-ops { display: flex; gap: 2px; }
     .toggle-row {
       display: flex;
       align-items: center;
@@ -252,6 +302,7 @@
     <div id="panel-tabs">
       <button class="tab-btn active" data-tab="space">空間</button>
       <button class="tab-btn" data-tab="cove">燈槽</button>
+      <button class="tab-btn" data-tab="light">光源</button>
       <button class="tab-btn" data-tab="view">視角</button>
     </div>
     <div id="panel-body">
@@ -302,6 +353,45 @@
 
       <!-- ── Tab: Cove ── -->
       <div class="tab-content" id="tab-cove">
+        <!-- 1. 模板列表 -->
+        <div class="section">
+          <div class="section-title">模板列表（存於本機）</div>
+          <div class="control-row">
+            <span class="control-label">名稱</span>
+            <input type="text" id="lib-name" class="text-input" placeholder="模板名稱">
+          </div>
+          <div class="btn-row">
+            <button id="lib-save" class="btn">儲存</button>
+            <button id="lib-saveas" class="btn">另存新檔</button>
+          </div>
+          <div class="control-row">
+            <select id="lib-select" class="select-input"></select>
+          </div>
+          <div class="btn-row">
+            <button id="lib-load" class="btn">載入</button>
+            <button id="lib-delete" class="btn">刪除</button>
+          </div>
+          <div class="hint" id="lib-status"></div>
+        </div>
+
+        <!-- 2. 進階：匯入／匯出模板（預設收合）-->
+        <details class="section">
+          <summary class="section-title" style="cursor:pointer">進階：匯入／匯出模板</summary>
+          <div class="btn-row">
+            <button id="profile-export" class="btn">匯出 JSON</button>
+            <button id="profile-import" class="btn">匯入套用</button>
+          </div>
+          <textarea id="profile-json" class="text-area" rows="5" placeholder="燈槽模板 JSON（按「匯出 JSON」顯示於此並複製；貼上後按「匯入套用」）"></textarea>
+          <div class="hint">幾何相對於燈槽尺寸、非室高；匯入到不同室高時，燈槽絕對位置與眩光結果會改變。</div>
+          <div class="hint" id="profile-status"></div>
+        </details>
+
+        <!-- 3. 模板元件編輯 -->
+        <div class="section">
+          <div id="cove-editor"></div>
+        </div>
+
+        <!-- 4. 啟用側別 -->
         <div class="section">
           <div class="section-title">啟用側別</div>
           <div class="toggle-row">
@@ -314,45 +404,50 @@
           </div>
         </div>
 
+        <!-- 5. 從範本開始 -->
         <div class="section">
-          <div class="section-title">燈槽幾何</div>
+          <div class="section-title">從範本開始</div>
+          <div class="btn-row wrap" id="cove-templates"></div>
+          <div class="hint">範本只是起點；建立後即可自由增刪元件、編輯頂點、設定材質。</div>
+        </div>
+      </div>
+
+      <!-- ── Tab: Light ── -->
+      <div class="tab-content" id="tab-light">
+        <div class="section">
+          <div class="section-title">光源模板列表（存於本機）</div>
           <div class="control-row">
-            <span class="control-label">燈槽深度</span>
-            <input type="range" id="cove-depth" min="20" max="300" step="5" value="150">
-            <span class="control-value" id="cove-depth-val">150 mm</span>
+            <span class="control-label">名稱</span>
+            <input type="text" id="light-lib-name" class="text-input" placeholder="光源名稱">
+          </div>
+          <div class="btn-row">
+            <button id="light-lib-save" class="btn">儲存</button>
+            <button id="light-lib-saveas" class="btn">另存新檔</button>
           </div>
           <div class="control-row">
-            <span class="control-label">燈槽高度</span>
-            <input type="range" id="cove-height" min="20" max="600" step="5" value="400">
-            <span class="control-value" id="cove-height-val">400 mm</span>
+            <select id="light-lib-select" class="select-input"></select>
           </div>
+          <div class="btn-row">
+            <button id="light-lib-load" class="btn">載入</button>
+            <button id="light-lib-delete" class="btn">刪除</button>
+          </div>
+          <div class="hint" id="light-lib-status"></div>
+          <div class="hint">模板僅儲存「光源形式」（發光角度／自體旋轉／色溫／亮度）。</div>
         </div>
 
         <div class="section">
-          <div class="section-title">擋板</div>
-          <div class="toggle-row">
-            <span class="control-label">啟用擋板</span>
-            <label class="toggle"><input type="checkbox" id="baffle-enabled" checked><span class="toggle-slider"></span></label>
+          <div class="section-title">光源掛點（於燈槽內）</div>
+          <div class="control-row">
+            <span class="control-label">距牆 u</span>
+            <input type="number" id="fixture-u" class="num-input" step="1">
+            <span class="unit-label">mm</span>
           </div>
           <div class="control-row">
-            <span class="control-label">擋板高度</span>
-            <input type="range" id="baffle-height" min="5" max="600" step="5" value="120">
-            <span class="control-value" id="baffle-height-val">120 mm</span>
+            <span class="control-label">距頂 d</span>
+            <input type="number" id="fixture-d" class="num-input" step="1">
+            <span class="unit-label">mm</span>
           </div>
-        </div>
-
-        <div class="section">
-          <div class="section-title">光源位置</div>
-          <div class="control-row">
-            <span class="control-label">距後牆</span>
-            <input type="range" id="light-wall-dist" min="0" max="300" step="5" value="90">
-            <span class="control-value" id="light-wall-dist-val">90 mm</span>
-          </div>
-          <div class="control-row">
-            <span class="control-label">距底板</span>
-            <input type="range" id="light-plate-dist" min="0" max="600" step="5" value="200">
-            <span class="control-value" id="light-plate-dist-val">200 mm</span>
-          </div>
+          <div class="hint">可直接在此分頁的畫布上拖曳橙色把手調整位置。</div>
         </div>
 
         <div class="section">
@@ -379,8 +474,12 @@
           </div>
         </div>
 
+      </div>
+
+      <!-- ── Tab: View ── -->
+      <div class="tab-content" id="tab-view">
         <div class="section">
-          <div class="section-title">射線設定</div>
+          <div class="section-title">射線設定（模擬顯示）</div>
           <div class="control-row">
             <span class="control-label">射線密度</span>
             <input type="range" id="ray-density" min="4" max="5000" step="2" value="20">
@@ -392,10 +491,7 @@
             <span class="control-value" id="ray-bounces-val">3 次</span>
           </div>
         </div>
-      </div>
 
-      <!-- ── Tab: View ── -->
-      <div class="tab-content" id="tab-view">
         <div class="section">
           <div class="section-title">背景</div>
           <div class="toggle-row">

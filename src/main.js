@@ -12,11 +12,14 @@ import { kelvinToColor } from './LightSources.js';
 const S = {
   room:  { W: 8, H: 3 },
   cove: {
-    depth: 0.15, height: 0.40,
-    baffleEnabled: true, baffleHeight: 0.12,
-    lightWallDist: 0.09, lightPlateDist: 0.20,
-    emissionAngle: 180, rotationAngle: 0,
-    lightKelvin: 3000, lightIntensity: 800,
+    // 燈槽形式（唯一真實來源）：面板清單 + 光源掛點。init 時以經典範本填入。
+    form: null,
+    // 光源：發光形式、顏色、與「作用中掛點位置」（與燈槽幾何完全分離；隨光源模板儲存）
+    light: {
+      emissionAngle: 180, rotationAngle: 0,
+      lightKelvin: 3000, lightIntensity: 800,
+      fixture: { u: 0.09, d: 0.20 },
+    },
   },
   sides: { left: true, right: true },
   wallReflect: { left: true, right: true }, // 槽外主牆面是否反射（關閉＝光線完全穿透）
@@ -37,13 +40,10 @@ const THEMES = {
 };
 const theme = () => THEMES[S.theme] || THEMES.dark;
 
-// 依燈槽幾何與側別計算光源座標（公尺）。距後牆與距底板皆夾在槽內。
-function lightPos(cove, side, W) {
-  const wd = clamp(cove.lightWallDist, 0, cove.depth);
-  const pd = clamp(cove.lightPlateDist, 0, cove.height);
-  const lx = side === 'L' ? wd : W - wd;
-  const ly = cove.bottomY + pd;
-  return { lx, ly };
+// 局部剖面座標 (u：自牆面向室內、d：自天花板向下) → 世界座標。
+// 集中所有左右鏡像：左側 x=u、右側 x=W-u；y=H-d。
+function toWorld(u, d, side, W, H) {
+  return { x: side === 'L' ? u : W - u, y: H - d };
 }
 
 // 燈具裸露邊界矩形（公尺）：以光源 (lx,ly) 為基準角，依水平/垂直基準設定延伸。
@@ -68,8 +68,8 @@ function glareBox(lx, ly, side) {
 // 光源顯示色：色相完全依色溫（與 kelvinToColor 一致），亮度僅影響
 // 透明度與光暈大小，不改變色相。回傳 0–255 的 r8/g8/b8 與亮度因子 bf。
 function lightDisplayColor() {
-  const lc = kelvinToColor(S.cove.lightKelvin);
-  const bf = clamp((S.cove.lightIntensity - 100) / (2000 - 100), 0, 1);
+  const lc = kelvinToColor(S.cove.light.lightKelvin);
+  const bf = clamp((S.cove.light.lightIntensity - 100) / (2000 - 100), 0, 1);
   return {
     r8: Math.round(lc.r * 255),
     g8: Math.round(lc.g * 255),
@@ -93,6 +93,7 @@ window.addEventListener('resize', resizeCanvas);
 // ══ 座標映射（含使用者縮放/平移）══════════════════════════════════
 let _scale = 1, _ox = 0, _oy = 0;
 let _zoom = 1, _panX = 0, _panY = 0;   // 使用者縮放倍率與平移量（螢幕像素）
+let _scene = null;                     // 最近一次 buildScene 結果（供命中測試）
 const ZOOM_MIN = 1, ZOOM_MAX = 12;
 
 function setupCoords(CW, CH) {
@@ -139,25 +140,347 @@ function zoomAt(sx, sy, factor) {
 
 function resetView() { _zoom = 1; _panX = 0; _panY = 0; redraw(); }
 
+// ══ 燈槽樣式產生器（回傳「局部剖面座標」幾何）══════════════════════
+// 每個範本：(g) => form，g = 範本預設幾何參數（DEFAULT_GEOMETRY）
+//   fillLoops: [{ fill, pts:[{u,d}...] }]      封閉多邊形，供繪製填色
+//   faces:     [{ a:{u,d}, b:{u,d}, r, surf }] 物理碰撞線段（不含貼牆面，由牆面處理）
+//   light:     { u, d }                        光源掛點
+//   shield:    { candidates:[{u,d}...], taggedIdx, hasCutoff }  遮擋邊緣候選
+// ══ 燈槽形式（form）→ 幾何編譯 ════════════════════════════════════
+// form = { schema:'cove-form@2', elements:[ element ], fixture:{u,d} }
+// element = { id, kind:'panel'|'polygon',
+//             path:{kind:'polyline',points:[{u,d}...]} | {kind:'arc',center:{u,d},radius,startDeg,sweepDeg},
+//             thickness, reflect(0-1), transparency(0-1), materialName, hidden }
+// 'panel'：中心線 ±thickness/2 成厚片；'polygon'：封閉填色多邊形（不規則實體）。
+
+// 圓弧 → 切線段（chord-error≈3mm 控制段數，夾 4..64）
+function arcPoints(arc) {
+  const R = Math.max(1e-4, arc.radius);
+  const sweep = Math.abs(arc.sweepDeg) * Math.PI / 180;
+  const e = 0.003;
+  const dThetaMax = R > e ? 2 * Math.acos(Math.max(-1, 1 - e / R)) : Math.PI;
+  const N = Math.max(4, Math.min(64, Math.ceil(sweep / dThetaMax) || 4));
+  const a0 = arc.startDeg * Math.PI / 180, dir = arc.sweepDeg >= 0 ? 1 : -1;
+  const pts = [];
+  for (let i = 0; i <= N; i++) {
+    const phi = a0 + dir * sweep * (i / N);
+    pts.push({ u: arc.center.u + R * Math.cos(phi), d: arc.center.d + R * Math.sin(phi) });
+  }
+  return pts;
+}
+// 將角度 a 加減 360 調到最接近 ref（連續拖曳避免跨 ±180 跳變）
+function unwrapAngle(a, ref) {
+  while (a - ref > 180) a -= 360;
+  while (a - ref < -180) a += 360;
+  return a;
+}
+// 弧線兩端點（局部座標）：角度 startDeg 與 startDeg+sweepDeg
+function arcEndpoints(arc) {
+  return [arc.startDeg, arc.startDeg + arc.sweepDeg].map(deg => {
+    const r = deg * Math.PI / 180;
+    return { u: arc.center.u + arc.radius * Math.cos(r), d: arc.center.d + arc.radius * Math.sin(r) };
+  });
+}
+// 取元件中心線點列（局部座標）
+function elementCenterline(el) {
+  return el.path.kind === 'arc' ? arcPoints(el.path) : el.path.points.map(p => ({ u: p.u, d: p.d }));
+}
+// 厚片：中心線 ±thickness/2 → 封閉外輪廓 + 邊界物理面
+function ribbonFromCenter(pts, thickness) {
+  const h = (thickness || THICK) / 2;
+  const left = [], right = [];
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
+    let tu = b.u - a.u, td = b.d - a.d; const L = Math.hypot(tu, td) || 1; tu /= L; td /= L;
+    const nu = -td, nd = tu;
+    left.push({ u: pts[i].u + nu * h, d: pts[i].d + nd * h });
+    right.push({ u: pts[i].u - nu * h, d: pts[i].d - nd * h });
+  }
+  const faces = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    faces.push({ a: left[i], b: left[i + 1] });
+    faces.push({ a: right[i], b: right[i + 1] });
+  }
+  const last = pts.length - 1;
+  faces.push({ a: left[0], b: right[0] });
+  faces.push({ a: left[last], b: right[last] });
+  return { outline: left.concat(right.slice().reverse()), faces };
+}
+
+// 編譯 form → local 幾何 { fillLoops, faces, light, shield, bottomD }
+// faces 每段帶 { a, b, r(反光), transparency(透光), surf }；貼牆面（u≈0）由牆面處理、不計入。
+const WALL_EPS = 1e-4;
+function compileForm(form, fixtureOverride) {
+  const fillLoops = [], faces = [], outlines = [];
+  let maxD = 0, wallMaxD = 0, maxU = 0;
+  for (const el of (form.elements || [])) {
+    if (el.hidden) continue;
+    let outline, rawFaces;
+    if (el.kind === 'polygon') {
+      const pts = elementCenterline(el);
+      outline = pts;
+      rawFaces = pts.map((p, i) => ({ a: p, b: pts[(i + 1) % pts.length] }));
+    } else { // panel
+      const r = ribbonFromCenter(elementCenterline(el), el.thickness);
+      outline = r.outline; rawFaces = r.faces;
+    }
+    const refl = clamp(el.reflect != null ? el.reflect : 0.25, 0, 1);
+    const tau  = clamp(el.transparency != null ? el.transparency : 0, 0, 1);
+    fillLoops.push({ id: el.id, fill: '#c0c0c0', transparency: tau, pts: outline });
+    for (const f of rawFaces) {
+      if (Math.abs(f.a.u) < WALL_EPS && Math.abs(f.b.u) < WALL_EPS) continue; // 貼牆面由牆面處理
+      faces.push({ a: f.a, b: f.b, r: refl, transparency: tau, surf: el.id || 'panel' });
+    }
+    for (const p of outline) {
+      if (p.d > maxD) maxD = p.d;
+      if (p.u > maxU) maxU = p.u;
+      if (p.u < WALL_EPS && p.d > wallMaxD) wallMaxD = p.d; // 貼牆材料的最低延伸
+    }
+    outlines.push({ outline, opaque: tau === 0 });
+  }
+  // 遮擋候選：取「離牆夠遠（非貼牆背板）」的不透光邊角；getShieldPoint 再選最高者。
+  const uMin = Math.max(0.02, 0.12 * maxU);
+  const shieldCands = [];
+  for (const o of outlines) if (o.opaque) for (const p of o.outline) if (p.u >= uMin) shieldCands.push(p);
+  const fixture = fixtureOverride || form.fixture || { u: 0.09, d: 0.20 };   // 作用中光源位置（光源分頁）
+  const shield = { candidates: shieldCands.length ? shieldCands : [fixture],
+                   taggedIdx: 0, hasCutoff: shieldCands.length > 0, silhouette: true };
+  // 牆面「槽內/槽外」分界：優先取貼牆材料的延伸（wallMaxD），無貼牆材料才退回整體最低點。
+  const bottomD = wallMaxD > 0 ? wallMaxD : maxD;
+  return { fillLoops, faces, light: { u: fixture.u, d: fixture.d }, shield, bottomD };
+}
+
+// ── 範本：由幾何參數產生可編輯的 form（取代舊預設產生器）──────────────
+// 光源掛點（局部座標）
+function coveLight(g) {
+  return { u: clamp(g.lightWallDist, 0, g.depth), d: g.height - clamp(g.lightPlateDist, 0, g.height) };
+}
+// 面板建構器
+function panel(id, name, points, reflect, opts) {
+  return { id, name, kind: 'panel', thickness: (opts && opts.thickness) || THICK,
+           reflect, transparency: (opts && opts.transparency) || 0, materialName: (opts && opts.materialName) || '',
+           path: { kind: 'polyline', points } };
+}
+// 整體沿 d 位移（detached 用）
+function shiftElements(els, dd) {
+  return els.map(el => ({ ...el, path: el.path.kind === 'arc'
+    ? { ...el.path, center: { u: el.path.center.u, d: el.path.center.d + dd } }
+    : { ...el.path, points: el.path.points.map(p => ({ u: p.u, d: p.d + dd })) } }));
+}
+
+const TEMPLATES = {
+  // 經典：底板（中心線在 height+T/2）＋選用前擋板（前緣 u=depth）
+  classic(g) {
+    const T = THICK, { depth, height } = g;
+    const safeBH = Math.min(g.baffleHeight, Math.max(0, height - 0.01));
+    const els = [ panel('plate', '底板', [ {u:0, d:height + T/2}, {u:depth, d:height + T/2} ], 0.25) ];
+    if (g.baffleEnabled && safeBH > 0.005)
+      els.push(panel('baffle', '前擋板', [ {u:depth, d:height}, {u:depth, d:height - safeBH} ], 0.2));
+    return { schema: 'cove-form@2', units: 'm', elements: els, fixture: coveLight(g), joints: [] };
+  },
+  // U 型槽：經典 + 貼牆背板（中心線 u=T/2）
+  uChannel(g) {
+    const T = THICK, { height } = g;
+    const safeBH = Math.min(g.baffleHeight, Math.max(0, height - 0.01));
+    const bh = safeBH > 0.005 ? safeBH : Math.min(0.12, height - 0.01);
+    const backH = clamp(g.backHeight, 0.01, height - 0.005);
+    const f = TEMPLATES.classic({ ...g, baffleEnabled: true, baffleHeight: bh });
+    f.elements.push(panel('back', '背板', [ {u:T/2, d:height}, {u:T/2, d:height - backH} ], 0.2));
+    return f;
+  },
+  // 上緣回折：經典 + 自前緣朝牆內的水平回折（中心線 d=bd-T/2）
+  topReturn(g) {
+    const T = THICK, { depth, height } = g;
+    const safeBH = Math.min(g.baffleHeight, Math.max(0, height - 0.01));
+    const bh = safeBH > 0.005 ? safeBH : Math.min(0.18, height - 0.01);
+    const bd = height - bh, lip = clamp(g.lipDepth, 0.01, depth - 0.005), innerU = depth + T/2 - lip;
+    const f = TEMPLATES.classic({ ...g, baffleEnabled: true, baffleHeight: bh });
+    f.elements.push(panel('lip', '上緣回折', [ {u:innerU, d:bd - T/2}, {u:depth + T/2, d:bd - T/2} ], 0.2));
+    return f;
+  },
+  // 離頂壁掛：經典整體下移 dropFromCeiling
+  detached(g) {
+    const drop = clamp(g.dropFromCeiling, 0, Math.max(0, g.height - 0.05));
+    const f = TEMPLATES.classic(g);
+    f.elements = shiftElements(f.elements, drop);
+    f.fixture = { u: f.fixture.u, d: f.fixture.d + drop };
+    return f;
+  },
+  // 斜向導光板：底板 + 自前緣傾斜平板
+  angledDeflector(g) {
+    const { depth, height } = g;
+    const safeBH = Math.min(g.baffleHeight, Math.max(0, height - 0.01));
+    const len = safeBH > 0.005 ? safeBH : Math.min(0.18, height - 0.01);
+    const rad = clamp(g.deflectAngle, -80, 80) * Math.PI / 180;
+    const f = TEMPLATES.classic({ ...g, baffleEnabled: false });
+    f.elements.push(panel('deflector', '斜向導光板',
+      [ {u:depth, d:height}, {u:depth + len*Math.sin(rad), d:height - len*Math.cos(rad)} ], 0.2));
+    return f;
+  },
+  // 弧形導光板：底板 + 自前緣圓弧
+  curvedDeflector(g) {
+    const { depth, height } = g;
+    const R = clamp(g.curveRadius, 0.03, 1.5), sweep = clamp(g.curveSweep, 10, 170);
+    const f = TEMPLATES.classic({ ...g, baffleEnabled: false });
+    f.elements.push({ id: 'curve', name: '弧形導光板', kind: 'panel', thickness: THICK, reflect: 0.2, transparency: 0, materialName: '',
+      path: { kind: 'arc', center: { u: depth - R, d: height }, radius: R, startDeg: 0, sweepDeg: -sweep } });
+    return f;
+  },
+  // 空白：無元件，僅光源掛點（從零開始繪製）
+  blank(g) {
+    return { schema: 'cove-form@2', units: 'm', elements: [], fixture: coveLight(g), joints: [] };
+  },
+};
+
+// 範本預設幾何參數（按「從範本」按鈕時用）
+const DEFAULT_GEOMETRY = {
+  depth: 0.15, height: 0.40, baffleEnabled: true, baffleHeight: 0.12,
+  lightWallDist: 0.09, lightPlateDist: 0.20, backHeight: 0.30, lipDepth: 0.06,
+  dropFromCeiling: 0.10, deflectAngle: 30, curveRadius: 0.22, curveSweep: 90,
+};
+// 範本中文名（給按鈕/onboarding）
+const TEMPLATE_LABELS = {
+  classic: '經典', uChannel: 'U 型槽', topReturn: '上緣回折',
+  detached: '離頂壁掛', angledDeflector: '斜向導光板', curvedDeflector: '弧形導光板', blank: '空白',
+};
+// 以範本建立新 form（深拷貝，確保可獨立編輯）
+function makeFormFromTemplate(name) {
+  const f = (TEMPLATES[name] || TEMPLATES.classic)(DEFAULT_GEOMETRY);
+  return JSON.parse(JSON.stringify(f));
+}
+// 初始化預設 form（經典）
+S.cove.form = makeFormFromTemplate('classic');
+
 // ══ 場景結構 ══════════════════════════════════════════════════════
+// 局部幾何 → 世界座標 coveData（每側一份，鏡像集中於 toWorld）。
+function makeCoveData(local, side, W, H, bottomY) {
+  const segments = local.faces.map((f, i) => {
+    const A = toWorld(f.a.u, f.a.d, side, W, H);
+    const B = toWorld(f.b.u, f.b.d, side, W, H);
+    const ex = B.x - A.x, ey = B.y - A.y;
+    const len = Math.hypot(ex, ey) || 1;
+    return { ax: A.x, ay: A.y, bx: B.x, by: B.y, r: f.r, transparency: f.transparency || 0,
+             surf: f.surf, nx: -ey / len, ny: ex / len, id: side + i };
+  });
+  const loops = local.fillLoops.map(l => ({ id: l.id, fill: l.fill, transparency: l.transparency || 0, pts: l.pts.map(p => toWorld(p.u, p.d, side, W, H)) }));
+  const lw = toWorld(local.light.u, local.light.d, side, W, H);
+  const shield = {
+    candidates: local.shield.candidates.map(p => toWorld(p.u, p.d, side, W, H)),
+    taggedIdx: local.shield.taggedIdx,
+    hasCutoff: local.shield.hasCutoff,
+    silhouette: !!local.shield.silhouette,
+  };
+  return { segments, loops, light: { lx: lw.x, ly: lw.y }, shield, bottomY, side };
+}
+
 function buildScene() {
   const { W, H } = S.room;
-  const c = S.cove;
-  // 距天花板即燈槽高度：燈槽貼齊天花板，底板在天花板下方 height 處。
-  const bottomY = H - c.height;
-  const safeBH  = Math.min(c.baffleHeight, Math.max(0, c.height - 0.01));
-  const coveData = {
-    depth: c.depth, height: c.height, bottomY, thick: THICK,
-    baffleEnabled: c.baffleEnabled, baffleHeight: safeBH,
-    lightWallDist: c.lightWallDist, lightPlateDist: c.lightPlateDist,
-  };
+  // 直接編譯使用者編輯中的 form；光源位置取自 S.cove.light.fixture（與燈槽分離）。
+  const local = compileForm(S.cove.form || { elements: [], fixture: { u: 0.09, d: 0.20 } }, S.cove.light.fixture);
+  // 牆面「槽內」分界：取貼牆材料延伸（compileForm 計算）。
+  const bottomD = local.bottomD != null ? local.bottomD : 0.4;
+  const bottomY = H - bottomD;
   return {
     W, H,
-    leftCove:  S.sides.left  ? coveData : null,
-    rightCove: S.sides.right ? coveData : null,
+    leftCove:  S.sides.left  ? makeCoveData(local, 'L', W, H, bottomY) : null,
+    rightCove: S.sides.right ? makeCoveData(local, 'R', W, H, bottomY) : null,
     refl: { ...S.refl },
     wallReflect: { ...S.wallReflect },
   };
+}
+
+// ══ Form 序列化（cove-form@2，僅燈槽幾何，與光源/室內解耦）══════════
+function serializeForm() {
+  const f = JSON.parse(JSON.stringify(S.cove.form));
+  f.originRoomH = S.room.H;   // 非規範註記：匯出時室高，供人對照
+  return f;
+}
+
+// 自訂剖面頂點驗證閘（公尺）：回傳 { ok, error, points }
+function validateCustomPoints(pts) {
+  if (!Array.isArray(pts)) return { ok:false, error:'points 不是陣列' };
+  const P = pts.map(p => ({ u: Number(p.u), d: Number(p.d) }));
+  if (P.some(p => !isFinite(p.u) || !isFinite(p.d))) return { ok:false, error:'座標含非數值' };
+  const D = P.filter((p,i) => i===0 || Math.hypot(p.u-P[i-1].u, p.d-P[i-1].d) > 1e-6); // 去連續重複/零長段
+  if (D.length < 3) return { ok:false, error:'至少需 3 個相異點' };
+  if (D.some(p => p.u < -1e-3 || p.u > 0.32 || p.d < -1e-3 || p.d > 0.65))
+    return { ok:false, error:'座標超出範圍（u 0~300mm、d 0~600mm）' };
+  // 非相鄰頂點重合（T 形交會／自觸）
+  for (let i = 0; i < D.length; i++)
+    for (let j = i + 2; j < D.length; j++) {
+      if (i === 0 && j === D.length - 1) continue;     // 首尾相鄰（封閉）
+      if (Math.hypot(D[i].u - D[j].u, D[i].d - D[j].d) < 1e-6)
+        return { ok:false, error:'非相鄰頂點重合' };
+    }
+  let area = 0;
+  for (let i=0;i<D.length;i++){ const a=D[i], b=D[(i+1)%D.length]; area += a.u*b.d - b.u*a.d; }
+  if (Math.abs(area/2) < 1e-6) return { ok:false, error:'多邊形面積過小或退化' };
+  if (polySelfIntersects(D)) return { ok:false, error:'多邊形邊線自相交' };
+  return { ok:true, points: D };
+}
+
+// 非相鄰邊線段相交偵測（封閉多邊形）
+function polySelfIntersects(P) {
+  const n = P.length;
+  const seg = (i) => [P[i], P[(i+1)%n]];
+  const cross = (o,a,b) => (a.u-o.u)*(b.d-o.d) - (a.d-o.d)*(b.u-o.u);
+  const inter = (p1,p2,p3,p4) => {
+    const d1=cross(p3,p4,p1), d2=cross(p3,p4,p2), d3=cross(p1,p2,p3), d4=cross(p1,p2,p4);
+    return ((d1>0&&d2<0)||(d1<0&&d2>0)) && ((d3>0&&d4<0)||(d3<0&&d4>0));
+  };
+  for (let i=0;i<n;i++) for (let j=i+1;j<n;j++) {
+    if (i===j) continue;
+    if (j===(i+1)%n || i===(j+1)%n) continue; // 相鄰邊
+    const [a,b]=seg(i), [c,d]=seg(j);
+    if (inter(a,b,c,d)) return true;
+  }
+  return false;
+}
+
+// 驗證 form 結構（匯入/套用前）→ { ok, error }
+function validateForm(form) {
+  if (!form || typeof form !== 'object' || !Array.isArray(form.elements))
+    return { ok:false, error:'form 結構無效' };
+  const fx = form.fixture;
+  if (!fx || !isFinite(Number(fx.u)) || !isFinite(Number(fx.d)))
+    return { ok:false, error:'光源掛點座標無效' };
+  for (let i = 0; i < form.elements.length; i++) {
+    const el = form.elements[i], tag = `元件 ${i + 1}`;
+    if (!el || !el.path) return { ok:false, error:`${tag} 缺少 path` };
+    if (el.reflect != null && !(el.reflect >= 0 && el.reflect <= 1)) return { ok:false, error:`${tag} 反光係數超界` };
+    if (el.transparency != null && !(el.transparency >= 0 && el.transparency <= 1)) return { ok:false, error:`${tag} 透光度超界` };
+    if (el.kind === 'polygon') {
+      const g = validateCustomPoints(el.path.points);
+      if (!g.ok) return { ok:false, error:`${tag}（多邊形）：${g.error}` };
+    } else if (el.path.kind === 'arc') {
+      const a = el.path;
+      if (!a.center || ![a.center.u, a.center.d, a.radius, a.startDeg, a.sweepDeg].every(v => isFinite(Number(v))) || a.radius <= 0)
+        return { ok:false, error:`${tag}（弧）參數無效` };
+    } else {
+      const pts = el.path.points;
+      if (!Array.isArray(pts) || pts.length < 2) return { ok:false, error:`${tag} 折線至少需 2 點` };
+      if (pts.some(p => !isFinite(Number(p.u)) || !isFinite(Number(p.d)))) return { ok:false, error:`${tag} 座標含非數值` };
+      if (el.thickness != null && !(el.thickness > 0)) return { ok:false, error:`${tag} 厚度需 > 0` };
+    }
+  }
+  return { ok:true };
+}
+
+// 解析 form JSON → { ok, error, form }
+function parseForm(text) {
+  let obj;
+  try { obj = JSON.parse(text); } catch (e) { return { ok:false, error:'JSON 格式錯誤：' + e.message }; }
+  if (!obj || typeof obj !== 'object') return { ok:false, error:'不是有效的 JSON 物件' };
+  // 舊格式 cove-profile@1 → 以對應範本概略轉換（不還原微調）
+  if (obj.schema === 'cove-profile@1') {
+    const tname = (obj.preset && obj.preset in TEMPLATES) ? obj.preset : 'classic';
+    return { ok:true, form: makeFormFromTemplate(tname) };
+  }
+  if (obj.schema !== 'cove-form@2') return { ok:false, error:'不支援的 schema（需 cove-form@2）' };
+  const v = validateForm(obj);
+  if (!v.ok) return { ok:false, error: v.error };
+  return { ok:true, form: { schema: 'cove-form@2', units: 'm', elements: obj.elements, fixture: obj.fixture,
+    joints: Array.isArray(obj.joints) ? obj.joints : [] } };   // 保留相黏接點（失效者由 ensureUniqueIds 清理）
 }
 
 // 牆面反射屬性：燈槽範圍內（底板以上的槽後牆）一律照常反射；
@@ -184,98 +507,47 @@ function wallVisibleBottom(scene, side) {
  * 找最近交點，回傳 { x, y, surf, r } 或 null
  * surf: 'ceiling' | 'floor' | 'wallL' | 'wallR' | 'plate' | 'baffle'
  */
-function findHit(ox, oy, dx, dy, scene) {
+function findHit(ox, oy, dx, dy, scene, ignoreId) {
   const { W, H, refl } = scene;
-  let tMin = Infinity, surf = null, r = 1, horiz = true, pass = false;
+  let tMin = Infinity, surf = null, r = 1, nx = 0, ny = 1, pass = false, hitId = null, transp = 0;
 
-  const try_ = (t, s, rv, h, p = false) => {
-    if (t > 1e-5 && t < tMin) { tMin = t; surf = s; r = rv; horiz = h; pass = p; }
+  // 反射用法向量 (hnx,hny)；反射公式 d'=d-2(d·n)n 與法向量正負號無關，
+  // 故軸向面以 (0,1)/(1,0) 表示即可，等價於原本的水平/垂直翻轉。
+  const try_ = (t, s, rv, hnx, hny, p = false, id = null, tr = 0) => {
+    if (t > 1e-5 && t < tMin) { tMin = t; surf = s; r = rv; nx = hnx; ny = hny; pass = p; hitId = id; transp = tr; }
   };
 
   // 室內四面
-  if (dy > 0) try_((H - oy) / dy, 'ceiling', refl.ceiling, true);
-  if (dy < 0) try_(-oy / dy,       'floor',   refl.floor, true);
+  if (dy > 0) try_((H - oy) / dy, 'ceiling', refl.ceiling, 0, 1);
+  if (dy < 0) try_(-oy / dy,       'floor',   refl.floor, 0, 1);
   if (dx < 0) {
     const t = -ox / dx, yi = oy + dy * t;
-    if (yi >= 0 && yi <= H) { const w = wallProps(scene, 'L', yi); try_(t, 'wallL', w.r, false, w.pass); }
+    if (yi >= 0 && yi <= H) { const w = wallProps(scene, 'L', yi); try_(t, 'wallL', w.r, 1, 0, w.pass); }
   }
   if (dx > 0) {
     const t = (W - ox) / dx, yi = oy + dy * t;
-    if (yi >= 0 && yi <= H) { const w = wallProps(scene, 'R', yi); try_(t, 'wallR', w.r, false, w.pass); }
+    if (yi >= 0 && yi <= H) { const w = wallProps(scene, 'R', yi); try_(t, 'wallR', w.r, 1, 0, w.pass); }
   }
 
-  // 燈槽結構（左右各一）— 考慮材料厚度
-  const addCove = (cove, side) => {
+  // 燈槽結構：通用射線 vs 線段（線段於 buildScene 依樣式產生，含反射率與法向量）
+  const addCove = (cove) => {
     if (!cove) return;
-    const { depth, bottomY, baffleEnabled, baffleHeight, thick } = cove;
-    const T = thick;
-
-    // ── 底板 box: [plateL, plateR] × [plateBot, plateTop] ──
-    const plateTop = bottomY;
-    const plateBot = bottomY - T;
-    const plateL = side === 'L' ? 0 : W - depth;
-    const plateR = side === 'L' ? depth : W;
-
-    // 底板上面 (水平)
-    if (dy < 0 && oy > plateTop) {
-      const t = (plateTop - oy) / dy, xi = ox + dx * t;
-      if (xi >= plateL && xi <= plateR) try_(t, 'plate', 0.25, true);
-    }
-    // 底板下面 (水平)
-    if (dy > 0 && oy < plateBot) {
-      const t = (plateBot - oy) / dy, xi = ox + dx * t;
-      if (xi >= plateL && xi <= plateR) try_(t, 'plate', 0.25, true);
-    }
-    // 底板前緣 (垂直面)
-    if (dx !== 0) {
-      const frontX = side === 'L' ? depth : W - depth;
-      const t = (frontX - ox) / dx;
-      if (t > 1e-5) {
-        const yi = oy + dy * t;
-        if (yi >= plateBot && yi <= plateTop) try_(t, 'plate', 0.25, false);
-      }
-    }
-
-    // ── 擋板 box: [bL, bR] × [bBot, bTop] ──
-    if (baffleEnabled && baffleHeight > 0.005) {
-      const bCenterX = side === 'L' ? depth : W - depth;
-      const bL = bCenterX - T / 2;
-      const bR = bCenterX + T / 2;
-      const bBot = bottomY;
-      const bTop = bottomY + baffleHeight;
-
-      // 擋板左面 (垂直)
-      if (dx !== 0) {
-        const t = (bL - ox) / dx;
-        if (t > 1e-5) {
-          const yi = oy + dy * t;
-          if (yi >= bBot && yi <= bTop) try_(t, 'baffle', 0.2, false);
-        }
-      }
-      // 擋板右面 (垂直)
-      if (dx !== 0) {
-        const t = (bR - ox) / dx;
-        if (t > 1e-5) {
-          const yi = oy + dy * t;
-          if (yi >= bBot && yi <= bTop) try_(t, 'baffle', 0.2, false);
-        }
-      }
-      // 擋板頂面 (水平)
-      if (dy !== 0) {
-        const t = (bTop - oy) / dy;
-        if (t > 1e-5) {
-          const xi = ox + dx * t;
-          if (xi >= bL && xi <= bR) try_(t, 'baffle', 0.2, true);
-        }
-      }
+    for (const sg of cove.segments) {
+      if (sg.id === ignoreId) continue;                 // 跳過剛碰撞的線段，避免掠射重複命中
+      const ex = sg.bx - sg.ax, ey = sg.by - sg.ay;
+      const denom = dx * ey - dy * ex;
+      if (Math.abs(denom) < 1e-12) continue;            // 平行
+      const t  = ((sg.ax - ox) * ey - (sg.ay - oy) * ex) / denom;
+      const sp = ((sg.ax - ox) * dy - (sg.ay - oy) * dx) / denom;
+      if (sp >= 0 && sp <= 1) try_(t, sg.surf, sg.r, sg.nx, sg.ny, false, sg.id, sg.transparency);  // try_ 內含 t>1e-5
     }
   };
 
-  addCove(scene.leftCove,  'L');
-  addCove(scene.rightCove, 'R');
+  addCove(scene.leftCove);
+  addCove(scene.rightCove);
 
   if (!surf) return null;
-  return { x: ox + dx * tMin, y: oy + dy * tMin, surf, r, horiz, pass };
+  return { x: ox + dx * tMin, y: oy + dy * tMin, surf, r, nx, ny, pass, segId: hitId, transparency: transp };
 }
 
 // ══ 射線繪製 ══════════════════════════════════════════════════════
@@ -283,13 +555,12 @@ function drawRays(scene, side) {
   const cove = side === 'L' ? scene.leftCove : scene.rightCove;
   if (!cove) return;
 
-  const { W } = scene;
-  const { lx: lightX, ly: lightY } = lightPos(cove, side, W);
+  const { lx: lightX, ly: lightY } = cove.light;
 
   // 發光範圍：不做幾何裁切，由射線與擋板/底板的碰撞自然決定遮蔽，
   // 因此自體旋轉可朝任意方向（含水平線以下）。
-  const raw  = S.cove.rotationAngle;
-  const half = S.cove.emissionAngle / 2;
+  const raw  = S.cove.light.rotationAngle;
+  const half = S.cove.light.emissionAngle / 2;
   const effMin = raw - half;
   const effMax = raw + half;
 
@@ -305,10 +576,10 @@ function drawRays(scene, side) {
     // 左側往右（+x）；右側往左（-x）
     const sign = side === 'L' ? 1 : -1;
     let cdx = sign * Math.sin(rad), cdy = Math.cos(rad);
-    let cox = lightX, coy = lightY, alpha = baseAlpha;
+    let cox = lightX, coy = lightY, alpha = baseAlpha, lastId = null;
 
     for (let b = 0; b <= S.ray.bounces; b++) {
-      const hit = findHit(cox, coy, cdx, cdy, scene);
+      const hit = findHit(cox, coy, cdx, cdy, scene, lastId);
       if (!hit) break;
 
       // 槽外牆面反射關閉 → 光線完全穿透牆面、沿原方向射出室外後結束
@@ -329,55 +600,209 @@ function drawRays(scene, side) {
       ctx.stroke();
 
       if (b === S.ray.bounces) break;
-      alpha *= hit.r;          // 每次反射依材質反光係數衰減
+
+      // 半透光/透光面：沿原方向穿透、依透光度衰減（單一行為，不分裂）。
+      if (hit.transparency > 0) {
+        alpha *= hit.transparency;
+        if (alpha < 0.012) break;
+        cox = hit.x + cdx * 1e-4;
+        coy = hit.y + cdy * 1e-4;
+        lastId = hit.segId;
+        continue;
+      }
+
+      alpha *= hit.r;          // 不透光：依反光係數衰減後反射
       if (alpha < 0.012) break;
 
-      // 反射方向（依碰撞面方向決定）
-      if (hit.horiz) {
-        cdy = -cdy; coy = hit.y + cdy * 1e-4; cox = hit.x;
-      } else {
-        cdx = -cdx; cox = hit.x + cdx * 1e-4; coy = hit.y;
-      }
+      // 反射方向：沿碰撞面法向量鏡射 d' = d - 2(d·n)n（支援斜面/曲面）。
+      // 軸向面的 (0,1)/(1,0) 法向量等價於原本的水平/垂直翻轉。
+      const dot = cdx * hit.nx + cdy * hit.ny;
+      cdx = cdx - 2 * dot * hit.nx;
+      cdy = cdy - 2 * dot * hit.ny;
+      cox = hit.x + cdx * 1e-4;
+      coy = hit.y + cdy * 1e-4;
+      lastId = hit.segId;       // 下一步忽略剛碰撞的線段（掠射防重複命中）
     }
   }
 }
 
 // ══ 燈槽幾何繪製 ══════════════════════════════════════════════════
+// 依 coveData.loops（封閉多邊形，世界座標）填色，樣式無關。
 function drawCoveGeo(scene, side) {
   const cove = side === 'L' ? scene.leftCove : scene.rightCove;
   if (!cove) return;
-  const { W } = scene;
-  const { depth, bottomY, baffleEnabled, baffleHeight, thick } = cove;
-  const T = thick;
-  const pt = Math.max(2, T * _scale); // 板厚像素，最少 2px
-
-  ctx.fillStyle = '#c0c0c0';
-  if (side === 'L') {
-    // 底板（有厚度的矩形）
-    ctx.fillRect(mx(0), my(bottomY), depth * _scale, pt);
-    // 擋板（有厚度的矩形）
-    if (baffleEnabled && baffleHeight > 0.005)
-      ctx.fillRect(mx(depth - T / 2), my(bottomY + baffleHeight), Math.max(2, T * _scale), baffleHeight * _scale);
-  } else {
-    // 底板
-    ctx.fillRect(mx(W - depth), my(bottomY), depth * _scale, pt);
-    // 擋板
-    if (baffleEnabled && baffleHeight > 0.005)
-      ctx.fillRect(mx(W - depth - T / 2), my(bottomY + baffleHeight), Math.max(2, T * _scale), baffleHeight * _scale);
+  for (const loop of cove.loops) {
+    // 透明度 → 填色不透明度（所見即所透）；半透光面板較淡。
+    const op = 1 - (loop.transparency || 0);
+    ctx.globalAlpha = Math.max(0.06, op);   // 編輯/檢視仍保留最低可見度
+    ctx.fillStyle = loop.fill;
+    ctx.beginPath();
+    loop.pts.forEach((p, i) => {
+      const X = mx(p.x), Y = my(p.y);
+      if (i === 0) ctx.moveTo(X, Y); else ctx.lineTo(X, Y);
+    });
+    ctx.closePath();
+    ctx.fill();
   }
+  ctx.globalAlpha = 1;
+}
+
+// 取遮擋邊緣（世界座標）。回傳 { x, y, hasCutoff }。
+//   非 silhouette：直接取標記角。
+//   silhouette：取「最高（最接近天花板）」的不透光材料邊角作為開口遮擋緣；
+//   同高時取最朝室內者（最易暴露光源）。不論該角在光源上下皆適用——光源高於
+//   遮擋緣即為眩光情形（由 analyzePoint 判定）。
+//   註：v1 啟發式，對極複雜剖面非嚴格精確，僅供參考。
+function getShieldPoint(cove, side, lightX, lightY) {
+  const sh = cove.shield;
+  const cands = sh.candidates || [];
+  if (!cands.length) return { x: 0, y: 0, hasCutoff: false };
+  if (!sh.silhouette) {
+    const p = cands[sh.taggedIdx] || cands[0];
+    return { x: p.x, y: p.y, hasCutoff: !!sh.hasCutoff };
+  }
+  const inward = side === 'L' ? 1 : -1;
+  let best = cands[0];
+  for (const p of cands) {
+    if (p.y > best.y + 1e-6) best = p;                          // 更高（世界 y 大 = 近天花板）
+    else if (Math.abs(p.y - best.y) < 1e-6 && inward * (p.x - best.x) < 0) best = p; // 同高取更靠牆（槽側，較保守）
+  }
+  return { x: best.x, y: best.y, hasCutoff: !!sh.hasCutoff };
+}
+
+// 局部座標軸（牆-天花板角原點 + u→/d↓ + 100mm 刻度）；燈槽與光源分頁共用
+function drawLocalAxes(scene, side) {
+  const { W, H } = scene;
+  const ox = mx(side === 'L' ? 0 : W), oy = my(H);
+  const inward = side === 'L' ? 1 : -1;
+  const wallX = side === 'L' ? 0 : W;
+  const axisLen = 0.3;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(120,170,255,0.30)';
+  ctx.fillStyle = 'rgba(140,185,255,0.75)';
+  ctx.lineWidth = 1;
+  ctx.font = '9px system-ui, sans-serif';
+  ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(mx(inward * axisLen + wallX), oy); ctx.stroke();   // u 軸
+  ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ox, my(H - axisLen)); ctx.stroke();                  // d 軸
+  for (let t = 0.1; t <= axisLen + 1e-6; t += 0.1) {                                                    // 100mm 刻度
+    const ux = mx(inward * t + wallX);
+    ctx.beginPath(); ctx.moveTo(ux, oy); ctx.lineTo(ux, oy - 3); ctx.stroke();
+    const dy = my(H - t);
+    ctx.beginPath(); ctx.moveTo(ox, dy); ctx.lineTo(ox + inward * 3, dy); ctx.stroke();
+  }
+  ctx.textAlign = side === 'L' ? 'left' : 'right';
+  ctx.fillText('u→', mx(inward * (axisLen - 0.04) + wallX), oy - 5);
+  ctx.fillText('d↓ (mm，自牆-頂角)', ox + inward * 5, my(H - axisLen) + 2);
+  ctx.restore();
+}
+
+// 燈槽分頁編輯輔助：座標軸 + 選取高亮 + 頂點/相黏把手（不含光源；光源在光源分頁）
+function drawEditorOverlay(scene, side) {
+  const cove = side === 'L' ? scene.leftCove : scene.rightCove;
+  if (!cove) return;
+  const { W, H } = scene;
+  drawLocalAxes(scene, side);
+
+  // 半透光面板：以斜線網點標示（編輯時讓「透光」與單純「淡色」可區分）
+  for (const loop of cove.loops) {
+    if ((loop.transparency || 0) <= 0.001) continue;
+    ctx.save();
+    ctx.beginPath();
+    loop.pts.forEach((p, i) => { const X = mx(p.x), Y = my(p.y); if (i === 0) ctx.moveTo(X, Y); else ctx.lineTo(X, Y); });
+    ctx.closePath(); ctx.clip();
+    const xs = loop.pts.map(p => mx(p.x)), ys = loop.pts.map(p => my(p.y));
+    const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys), span = y1 - y0;
+    ctx.strokeStyle = 'rgba(170,205,255,0.30)'; ctx.lineWidth = 1;
+    for (let x = x0 - span; x < x1; x += 5) { ctx.beginPath(); ctx.moveTo(x, y1); ctx.lineTo(x + span, y0); ctx.stroke(); }
+    ctx.restore();
+  }
+
+  // 僅選取元件：高亮外框（compiled outline）
+  const selLoop = cove.loops.find(l => l.id === selectedElementId);
+  if (selLoop) {
+    ctx.save();
+    ctx.beginPath();
+    selLoop.pts.forEach((p, i) => { const X = mx(p.x), Y = my(p.y); if (i === 0) ctx.moveTo(X, Y); else ctx.lineTo(X, Y); });
+    ctx.closePath();
+    ctx.strokeStyle = 'rgba(80,200,255,0.95)'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.restore();
+  }
+  // 相黏頂點：所有可見元件的相黏點畫外圈光環（標示接點網路）
+  ctx.save();
+  ctx.strokeStyle = 'rgba(120,255,180,0.8)'; ctx.lineWidth = 1.5;
+  for (const el of S.cove.form.elements) {
+    if (el.hidden || el.path.kind === 'arc') continue;
+    for (const p of el.path.points) if (isBonded(el.id, p.pid)) { const w = toWorld(p.u, p.d, side, W, H); ctx.beginPath(); ctx.arc(mx(w.x), my(w.y), 6, 0, Math.PI * 2); ctx.stroke(); }
+  }
+  ctx.restore();
+
+  // 頂點/端點把手：折線/多邊形畫每個路徑點；弧線畫兩端點（拖曳調整角度）+ 圓心
+  const selEl = S.cove.form.elements.find(e => e.id === selectedElementId);
+  if (selEl && !selEl.hidden) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(80,200,255,0.95)'; ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.lineWidth = 1;
+    if (selEl.path.kind === 'arc') {
+      for (const p of arcEndpoints(selEl.path)) { const w = toWorld(p.u, p.d, side, W, H); ctx.beginPath(); ctx.rect(mx(w.x) - 4, my(w.y) - 4, 8, 8); ctx.fill(); ctx.stroke(); }
+      const c = toWorld(selEl.path.center.u, selEl.path.center.d, side, W, H);   // 圓心（小十字，僅標示）
+      ctx.strokeStyle = 'rgba(80,200,255,0.6)';
+      ctx.beginPath(); ctx.moveTo(mx(c.x) - 4, my(c.y)); ctx.lineTo(mx(c.x) + 4, my(c.y)); ctx.moveTo(mx(c.x), my(c.y) - 4); ctx.lineTo(mx(c.x), my(c.y) + 4); ctx.stroke();
+    } else {
+      for (const p of selEl.path.points) { const w = toWorld(p.u, p.d, side, W, H); ctx.beginPath(); ctx.rect(mx(w.x) - 4, my(w.y) - 4, 8, 8); ctx.fill(); ctx.stroke(); }
+    }
+    ctx.restore();
+  }
+  // （光源掛點不在燈槽分頁顯示／編輯；請至「光源」分頁）
+
+  // 拖曳吸附中：高亮目標頂點（放開即相黏）
+  if (dragState && dragState.snap) {
+    const w = toWorld(dragState.snap.u, dragState.snap.d, side, W, H);
+    ctx.save();
+    ctx.strokeStyle = 'rgba(120,255,180,1)'; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(mx(w.x), my(w.y), 9, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+}
+
+// 光源分頁：座標軸 + 可拖曳的光源掛點把手（實心橙圓）+ u/d 讀數
+function drawFixtureHandle(scene, side) {
+  const cove = side === 'L' ? scene.leftCove : scene.rightCove;
+  if (!cove) return;
+  drawLocalAxes(scene, side);
+  const fx = S.cove.form.fixture, hx = mx(cove.light.lx), hy = my(cove.light.ly);
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,200,80,0.95)'; ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(hx, hy, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,210,120,0.95)'; ctx.font = '10px system-ui, sans-serif'; ctx.textAlign = 'left';
+  ctx.fillText(`u ${Math.round(fx.u * 1000)}, d ${Math.round(fx.d * 1000)} mm`, hx + 9, hy - 7);
+  ctx.restore();
+}
+
+// 拖曳時的座標徽章（螢幕座標）
+function drawDragBadge() {
+  if (!dragBadge) return;
+  const txt = dragBadge.text || '';
+  ctx.save();
+  ctx.font = '11px system-ui, sans-serif';
+  const w = ctx.measureText(txt).width + 10;
+  const bx = dragBadge.sx + 12, by = dragBadge.sy - 24;
+  ctx.fillStyle = 'rgba(20,28,36,0.92)'; ctx.strokeStyle = 'rgba(80,200,255,0.7)'; ctx.lineWidth = 1;
+  ctx.fillRect(bx, by, w, 18); ctx.strokeRect(bx, by, w, 18);
+  ctx.fillStyle = 'rgba(200,230,255,0.95)'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(txt, bx + 5, by + 9);
+  ctx.restore();
 }
 
 // ── 遮光截止角虛線 ──────────────────────────────────────────────
 function drawCriticalAngle(scene, side) {
   const cove = side === 'L' ? scene.leftCove : scene.rightCove;
-  if (!cove || !cove.baffleEnabled || cove.baffleHeight <= 0.005) return;
-  const { W, H } = scene;
-  const { depth, bottomY, baffleHeight, thick } = cove;
-  const { lx: lightX, ly: lightY } = lightPos(cove, side, W);
-  const T = thick;
-  // 遮光臨界點取擋板槽側頂角（材料厚度偏移）
-  const baffleX = side === 'L' ? depth - T / 2 : W - depth + T / 2;
-  const baffleTop = bottomY + baffleHeight;
+  if (!cove) return;
+  const { H } = scene;
+  const { lx: lightX, ly: lightY } = cove.light;
+  const sp = getShieldPoint(cove, side, lightX, lightY);
+  if (!sp.hasCutoff) return;
+  // 遮光臨界點取遮擋邊緣（含材料厚度偏移）
+  const baffleX = sp.x;
+  const baffleTop = sp.y;
   if (lightY >= baffleTop) return;
 
   const ddx = baffleX - lightX, ddy = baffleTop - lightY;
@@ -403,8 +828,7 @@ function drawCriticalAngle(scene, side) {
 function drawLightDot(scene, side) {
   const cove = side === 'L' ? scene.leftCove : scene.rightCove;
   if (!cove) return;
-  const { W } = scene;
-  const { lx, ly } = lightPos(cove, side, W);
+  const { lx, ly } = cove.light;
   // 光暈顏色隨色溫/亮度，光暈大小亦隨亮度增大。
   const { r8, g8, b8, bf } = lightDisplayColor();
   const glowR = Math.min(34, _scale * (0.16 + 0.20 * bf));
@@ -424,8 +848,7 @@ function drawGlareBox(scene, side) {
   if (!cove) return;
   const gW = Math.max(0, S.glare.width), gH = Math.max(0, S.glare.height);
   if (gW <= 0 && gH <= 0) return;
-  const { W } = scene;
-  const { lx, ly } = lightPos(cove, side, W);
+  const { lx, ly } = cove.light;
   const { x0, x1, y0, y1 } = glareBox(lx, ly, side);
   const { r8, g8, b8 } = lightDisplayColor();
   const px = mx(x0), py = my(y1), pw = (x1 - x0) * _scale, ph = (y1 - y0) * _scale;
@@ -464,16 +887,12 @@ function analyzePoint(px, py, baffleX, edgeY, eyeH) {
 }
 
 function analyzeSide(cove, side, W, eyeH) {
-  const { depth, bottomY, baffleEnabled, baffleHeight, thick } = cove;
-  const { lx: lightX, ly: lightY } = lightPos(cove, side, W);
-  const T = thick;
+  const { lx: lightX, ly: lightY } = cove.light;
 
-  // 遮擋邊緣：有擋板取擋板槽側頂角，否則取底板前緣。（含材料厚度偏移）
-  const hasBaffle = baffleEnabled && baffleHeight > 0.005;
-  const baffleX = hasBaffle
-    ? (side === 'L' ? depth - T / 2 : W - depth + T / 2)
-    : (side === 'L' ? depth : W - depth);
-  const edgeY = hasBaffle ? bottomY + baffleHeight : bottomY;
+  // 遮擋邊緣：由樣式決定（classic 為擋板槽側頂角或底板前緣，含材料厚度偏移）。
+  const sp = getShieldPoint(cove, side, lightX, lightY);
+  const baffleX = sp.x;
+  const edgeY = sp.y;
 
   // 燈具裸露邊界：矩形範圍，基準角（光源所在角）可設定。
   // 把光源視為一個矩形範圍，眩光取「最易被看見」的角（眩光區最大）作為判定。
@@ -646,6 +1065,7 @@ function redraw() {
   ctx.clearRect(0, 0, CW, CH);
 
   const scene = buildScene();
+  _scene = scene;   // 供命中測試（pickBody）使用
   const { W, H } = scene;
 
   // 背景（依主題）
@@ -700,6 +1120,22 @@ function redraw() {
 
   // 尺寸標注
   drawDims(scene);
+
+  // 編輯輔助（僅燈槽分頁啟用時）：選取高亮、頂點、光源把手、座標軸
+  const coveTab = document.getElementById('tab-cove');
+  if (coveTab && coveTab.classList.contains('active')) {
+    drawEditorOverlay(scene, 'L');
+    drawEditorOverlay(scene, 'R');
+    drawDragBadge();
+  }
+  const lightTab = document.getElementById('tab-light');
+  if (lightTab && lightTab.classList.contains('active')) {
+    drawFixtureHandle(scene, 'L');
+    drawFixtureHandle(scene, 'R');
+    drawDragBadge();
+  }
+
+  if (typeof scheduleSave === 'function') scheduleSave();   // 任何變更後自動暫存（debounced）
 }
 
 // ══ UI Bindings ═══════════════════════════════════════════════════
@@ -709,6 +1145,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    redraw();   // 切換到燈槽分頁時顯示/隱藏編輯輔助
   });
 });
 
@@ -780,19 +1217,539 @@ bindSlider('refl-floor',   'refl-floor-val',   '', 2, v => { S.refl.floor   = v;
 document.getElementById('wall-refl-left').addEventListener('change',  e => { S.wallReflect.left  = e.target.checked; redraw(); });
 document.getElementById('wall-refl-right').addEventListener('change', e => { S.wallReflect.right = e.target.checked; redraw(); });
 
-// 燈槽（光源相關）
+// 啟用側別
 document.getElementById('side-left').addEventListener('change',  e => { S.sides.left  = e.target.checked; redraw(); });
 document.getElementById('side-right').addEventListener('change', e => { S.sides.right = e.target.checked; redraw(); });
-bindSlider('cove-depth',  'cove-depth-val',  'mm', 0, v => { S.cove.depth  = v / 1000; });
-bindSlider('cove-height', 'cove-height-val', 'mm', 0, v => { S.cove.height = v / 1000; });
-document.getElementById('baffle-enabled').addEventListener('change', e => { S.cove.baffleEnabled = e.target.checked; redraw(); });
-bindSlider('baffle-height',     'baffle-height-val',     'mm', 0, v => { S.cove.baffleHeight   = v / 1000; });
-bindSlider('light-wall-dist',   'light-wall-dist-val',   'mm', 0, v => { S.cove.lightWallDist  = v / 1000; });
-bindSlider('light-plate-dist',  'light-plate-dist-val',  'mm', 0, v => { S.cove.lightPlateDist = v / 1000; });
-bindSlider('emission-angle', 'emission-angle-val', '°', 0, v => { S.cove.emissionAngle = v; });
-bindSlider('rotation-angle', 'rotation-angle-val', '°', 0, v => { S.cove.rotationAngle = v; });
-bindSlider('light-kelvin',   'light-kelvin-val',   'K', 0, v => { S.cove.lightKelvin   = v; });
-bindSlider('light-intensity', 'light-intensity-val', '', 0, v => { S.cove.lightIntensity = v; });
+
+// ══ 燈槽形式編輯器 ════════════════════════════════════════════════
+let selectedElementId = null;
+let nextElId = 1, nextPid = 1;
+const genElId = () => 'el' + (nextElId++);
+const genPid = () => 'p' + (nextPid++);
+// 確保 element id 與頂點 pid 唯一、補齊缺漏，並清理失效的相黏接點（匯入/範本/載入後呼叫）
+function ensureUniqueIds(form) {
+  let maxE = 0, maxP = 0;
+  for (const el of form.elements) {
+    const m = /^el(\d+)$/.exec(el.id || ''); if (m) maxE = Math.max(maxE, +m[1]);
+    if (el.path && el.path.kind !== 'arc') for (const p of (el.path.points || [])) { const mp = /^p(\d+)$/.exec(p.pid || ''); if (mp) maxP = Math.max(maxP, +mp[1]); }
+  }
+  nextElId = Math.max(nextElId, maxE + 1); nextPid = Math.max(nextPid, maxP + 1);
+  const seenE = new Set(), seenP = new Set();
+  for (const el of form.elements) {
+    if (!el.id || seenE.has(el.id)) el.id = genElId();
+    seenE.add(el.id);
+    if (el.path && el.path.kind !== 'arc') for (const p of (el.path.points || [])) {
+      if (!p.pid || seenP.has(p.pid)) p.pid = genPid();
+      seenP.add(p.pid);
+    }
+  }
+  pruneJoints(form);
+}
+// ── 相黏接點（joints）：頂點群組共享座標 ──────────────────────────
+function getPointByPid(el, pid) {
+  if (!el || !el.path || el.path.kind === 'arc') return null;
+  return el.path.points.find(p => p.pid === pid) || null;
+}
+function pruneJoints(form) {
+  if (!Array.isArray(form.joints)) { form.joints = []; return; }
+  const valid = (m) => m && typeof m.el === 'string' && typeof m.pid === 'string' &&
+    (() => { const el = form.elements.find(e => e.id === m.el); return el && getPointByPid(el, m.pid); })();
+  form.joints = form.joints
+    .filter(g => Array.isArray(g))                         // 容錯：忽略非陣列群組
+    .map(g => {
+      const seen = new Set(), out = [];
+      for (const m of g) { if (!valid(m)) continue; const k = m.el + '/' + m.pid; if (!seen.has(k)) { seen.add(k); out.push({ el: m.el, pid: m.pid }); } }
+      return out;
+    }).filter(g => g.length >= 2);
+}
+function jointIndexOf(form, elId, pid) { return (form.joints || []).findIndex(g => g.some(m => m.el === elId && m.pid === pid)); }
+function isBonded(elId, pid) { return jointIndexOf(S.cove.form, elId, pid) >= 0; }
+// 把某頂點現在座標同步給其接點群組所有成員
+function propagateJoint(elId, pid) {
+  const form = S.cove.form, gi = jointIndexOf(form, elId, pid); if (gi < 0) return;
+  const src = getPointByPid(form.elements.find(e => e.id === elId), pid); if (!src) return;
+  for (const m of form.joints[gi]) {
+    if (m.el === elId && m.pid === pid) continue;
+    const p = getPointByPid(form.elements.find(e => e.id === m.el), m.pid);
+    if (p) { p.u = src.u; p.d = src.d; }
+  }
+}
+// 元件整體移動後：把它所有相黏頂點同步給「其他元件」夥伴（略過同元件成員，避免塌陷）
+function propagateElementJoints(elId) {
+  const form = S.cove.form, el = form.elements.find(e => e.id === elId);
+  if (!el || !el.path || el.path.kind === 'arc') return;
+  for (const p of el.path.points) {
+    const gi = jointIndexOf(form, elId, p.pid); if (gi < 0) continue;
+    for (const m of form.joints[gi]) {
+      if (m.el === elId) continue;   // 同元件成員已隨整體位移，勿再覆蓋
+      const tp = getPointByPid(form.elements.find(e => e.id === m.el), m.pid);
+      if (tp) { tp.u = p.u; tp.d = p.d; }
+    }
+  }
+}
+// 相黏兩頂點（群組聯集）
+function bondVertices(a, b) {
+  if (a.el === b.el && a.pid === b.pid) return;
+  const form = S.cove.form; if (!Array.isArray(form.joints)) form.joints = [];
+  const ga = jointIndexOf(form, a.el, a.pid), gb = jointIndexOf(form, b.el, b.pid);
+  if (ga < 0 && gb < 0) form.joints.push([{ el: a.el, pid: a.pid }, { el: b.el, pid: b.pid }]);
+  else if (ga >= 0 && gb < 0) form.joints[ga].push({ el: b.el, pid: b.pid });
+  else if (gb >= 0 && ga < 0) form.joints[gb].push({ el: a.el, pid: a.pid });
+  else if (ga !== gb) { form.joints[ga] = form.joints[ga].concat(form.joints[gb]); form.joints.splice(gb, 1); }
+  pruneJoints(form);
+}
+function detachVertex(elId, pid) {
+  const form = S.cove.form, gi = jointIndexOf(form, elId, pid); if (gi < 0) return;
+  form.joints[gi] = form.joints[gi].filter(m => !(m.el === elId && m.pid === pid));
+  pruneJoints(form);
+}
+
+function refreshEditor() { ensureUniqueIds(S.cove.form); renderCoveEditor(); redraw(); if (typeof updateLibraryStatus === 'function') updateLibraryStatus(); }
+function afterEdit() { redraw(); runLiveValidation(); if (typeof updateLibraryStatus === 'function') updateLibraryStatus(); }
+function applyTemplate(name) {
+  if (S.cove.form) snapshot();
+  activeFormName = null; savedFormJson = null;   // 從範本＝新草稿
+  S.cove.form = makeFormFromTemplate(name);
+  ensureUniqueIds(S.cove.form);
+  selectedElementId = (S.cove.form.elements[0] || {}).id || null;
+  refreshEditor();
+}
+function applyForm(form) {
+  if (S.cove.form) snapshot();
+  S.cove.form = form;
+  ensureUniqueIds(S.cove.form);
+  selectedElementId = (form.elements[0] || {}).id || null;
+  refreshEditor();
+}
+
+// — 輕量 DOM 建構器 —
+function h(tag, attrs, kids) {
+  const e = document.createElement(tag);
+  if (attrs) for (const k in attrs) {
+    if (k === 'class') e.className = attrs[k];
+    else if (k === 'text') e.textContent = attrs[k];
+    else if (k === 'title') e.title = attrs[k];
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2), attrs[k]);
+    else e.setAttribute(k, attrs[k]);
+  }
+  (kids || []).forEach(c => e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c));
+  return e;
+}
+// 數值欄位（顯示單位）：即時更新 form + 重繪 + 即時驗證，不重建 DOM（保留焦點）
+function field(label, dispVal, unit, step, onInput) {
+  const inp = h('input', { type: 'number', class: 'num-input', step: step || 'any', value: dispVal });
+  inp.addEventListener('focus', () => snapshot());
+  inp.addEventListener('input', () => { const v = parseFloat(inp.value); if (isFinite(v)) { onInput(v); afterEdit(); } });
+  return h('div', { class: 'control-row' }, [ h('span', { class: 'control-label', text: label }), inp,
+    h('span', { class: 'unit-label', text: unit || '' }) ]);
+}
+// 即時驗證目前 form，更新編輯器頂部警示列（不重建 DOM）
+function runLiveValidation() {
+  const el = document.getElementById('cove-validate');
+  if (!el) return;
+  const v = validateForm(S.cove.form);
+  if (v.ok) { el.textContent = ''; el.className = 'hint'; }
+  else { el.textContent = '⚠ ' + v.error; el.className = 'hint error'; }
+}
+function textField(label, val, onInput) {
+  const inp = h('input', { type: 'text', class: 'text-input', value: val || '' });
+  inp.addEventListener('input', () => onInput(inp.value));
+  return h('div', { class: 'control-row' }, [ h('span', { class: 'control-label', text: label }), inp ]);
+}
+
+// — 結構性操作（皆先 snapshot 供 Undo）—
+function addEl(kind) {
+  snapshot();
+  const id = genElId();
+  let el;
+  if (kind === 'polygon')
+    el = { id, name: '多邊形', kind: 'polygon', reflect: 0.25, transparency: 0, materialName: '',
+           path: { kind: 'polyline', points: [ {u:0.05,d:0.30},{u:0.15,d:0.30},{u:0.15,d:0.40},{u:0.05,d:0.40} ] } };
+  else if (kind === 'arc')
+    el = { id, name: '弧形', kind: 'panel', thickness: THICK, reflect: 0.2, transparency: 0, materialName: '',
+           path: { kind: 'arc', center: { u: 0.05, d: 0.30 }, radius: 0.10, startDeg: 0, sweepDeg: -90 } };
+  else
+    el = { id, name: '面板', kind: 'panel', thickness: THICK, reflect: 0.25, transparency: 0, materialName: '',
+           path: { kind: 'polyline', points: [ {u:0,d:0.40},{u:0.15,d:0.40} ] } };
+  S.cove.form.elements.push(el); selectedElementId = id; refreshEditor();
+}
+function delEl(i) {
+  snapshot();
+  const el = S.cove.form.elements[i]; S.cove.form.elements.splice(i, 1);
+  if (el.id === selectedElementId) selectedElementId = (S.cove.form.elements[0] || {}).id || null;
+  refreshEditor();
+}
+function dupEl(i) {
+  snapshot();
+  const c = JSON.parse(JSON.stringify(S.cove.form.elements[i])); c.id = genElId(); c.name = (c.name || '') + ' 複本';
+  S.cove.form.elements.splice(i + 1, 0, c); selectedElementId = c.id; refreshEditor();
+}
+function moveEl(i, dir) {
+  const a = S.cove.form.elements, j = i + dir; if (j < 0 || j >= a.length) return;
+  snapshot();
+  const t = a[i]; a[i] = a[j]; a[j] = t; refreshEditor();
+}
+function insertPoint(el, pi) {
+  snapshot();
+  const pts = el.path.points, a = pts[pi], b = pts[(pi + 1) % pts.length] || a;
+  pts.splice(pi + 1, 0, { u: (a.u + b.u) / 2, d: (a.d + b.d) / 2 }); refreshEditor();
+}
+function deletePoint(el, pi) {
+  const min = el.kind === 'polygon' ? 3 : 2; if (el.path.points.length <= min) return;
+  snapshot();
+  el.path.points.splice(pi, 1); refreshEditor();
+}
+function arcToPolyline(el) { snapshot(); el.path = { kind: 'polyline', points: arcPoints(el.path) }; refreshEditor(); }
+
+// — 重建編輯器 DOM —
+function renderCoveEditor() {
+  const root = document.getElementById('cove-editor');
+  if (!root) return;
+  root.innerHTML = '';
+  const form = S.cove.form;
+
+  // 即時驗證警示列
+  root.appendChild(h('div', { id: 'cove-validate', class: 'hint' }));
+  root.appendChild(h('div', { class: 'hint', text: '座標以「牆-天花板角」為原點：u＝距牆、d＝距頂（mm）。左右共用同一形式（鏡像）。選取後可拖曳把手/本體、方向鍵微調（Shift=10mm）。把頂點拖到另一頂點上會「相黏」連動；Alt+拖曳或按 ⛓ 解除。' }));
+
+  // 元件清單
+  root.appendChild(h('div', { class: 'section-title', text: '元件清單' }));
+  if (!form.elements.length)
+    root.appendChild(h('div', { class: 'hint', text: '尚無元件。按下方「新增」或選一個範本開始。' }));
+  const list = h('div', { class: 'el-list' });
+  form.elements.forEach((el, i) => {
+    const sel = el.id === selectedElementId;
+    list.appendChild(h('div', { class: 'el-row' + (sel ? ' sel' : '') }, [
+      h('button', { class: 'el-btn', title: '顯示/隱藏', text: el.hidden ? '◯' : '●',
+        onclick: (ev) => { ev.stopPropagation(); el.hidden = !el.hidden; refreshEditor(); } }),
+      h('span', { class: 'el-name', text: (el.kind === 'polygon' ? '▰ ' : '▭ ') + (el.name || el.id),
+        onclick: () => { selectedElementId = el.id; refreshEditor(); } }),
+      h('button', { class: 'el-btn', title: '上移', text: '▲', onclick: (ev) => { ev.stopPropagation(); moveEl(i, -1); } }),
+      h('button', { class: 'el-btn', title: '下移', text: '▼', onclick: (ev) => { ev.stopPropagation(); moveEl(i, 1); } }),
+      h('button', { class: 'el-btn', title: '複製', text: '⧉', onclick: (ev) => { ev.stopPropagation(); dupEl(i); } }),
+      h('button', { class: 'el-btn', title: '刪除', text: '✕', onclick: (ev) => { ev.stopPropagation(); delEl(i); } }),
+    ]));
+  });
+  root.appendChild(list);
+  root.appendChild(h('div', { class: 'btn-row wrap' }, [
+    h('button', { class: 'btn', text: '＋ 折線', onclick: () => addEl('panel') }),
+    h('button', { class: 'btn', text: '＋ 弧線', onclick: () => addEl('arc') }),
+    h('button', { class: 'btn', text: '＋ 多邊形', onclick: () => addEl('polygon') }),
+  ]));
+
+  // 選取元件 inspector
+  const el = form.elements.find(e => e.id === selectedElementId);
+  if (el) {
+    root.appendChild(h('div', { class: 'section-title', text: '材質與尺寸' }));
+    root.appendChild(textField('名稱', el.name, v => { el.name = v; const n = list.querySelector('.el-row.sel .el-name'); if (n) n.textContent = (el.kind === 'polygon' ? '▰ ' : '▭ ') + (v || el.id); }));
+    root.appendChild(field('反光係數', Math.round((el.reflect || 0) * 100), '%', 1, v => { el.reflect = clamp(v / 100, 0, 1); }));
+    root.appendChild(field('透光度', Math.round((el.transparency || 0) * 100), '%', 1, v => { el.transparency = clamp(v / 100, 0, 1); }));
+    root.appendChild(h('div', { class: 'hint', text: '參考：白漆≈85%、鏡面≈95%、深色≈10%；透光度>0 即半透光' }));
+    root.appendChild(textField('材料名稱', el.materialName, v => { el.materialName = v; }));
+    if (el.kind !== 'polygon')
+      root.appendChild(field('厚度', Math.round((el.thickness || THICK) * 1000), 'mm', 1, v => { el.thickness = Math.max(0.001, v / 1000); }));
+
+    // 幾何
+    root.appendChild(h('div', { class: 'section-title', text: '幾何' }));
+    if (el.path.kind === 'arc') {
+      const a = el.path;
+      root.appendChild(field('圓心 u', Math.round(a.center.u * 1000), 'mm', 1, v => { a.center.u = v / 1000; }));
+      root.appendChild(field('圓心 d', Math.round(a.center.d * 1000), 'mm', 1, v => { a.center.d = v / 1000; }));
+      root.appendChild(field('半徑', Math.round(a.radius * 1000), 'mm', 1, v => { a.radius = Math.max(0.001, v / 1000); }));
+      root.appendChild(field('起始角', a.startDeg, '°', 1, v => { a.startDeg = v; }));
+      root.appendChild(field('掃掠角', a.sweepDeg, '°', 1, v => { a.sweepDeg = v; }));
+      root.appendChild(h('div', { class: 'btn-row' }, [ h('button', { class: 'btn', text: '轉為折線', onclick: () => arcToPolyline(el) }) ]));
+    } else {
+      const tbl = h('div', { class: 'pt-table' });
+      tbl.appendChild(h('div', { class: 'pt-row pt-head' }, [ h('span', { class: 'pt-idx', text: '#' }),
+        h('span', { class: 'pt-h', text: 'u (mm)' }), h('span', { class: 'pt-h', text: 'd (mm)' }), h('span', { class: 'pt-h', text: '' }) ]));
+      el.path.points.forEach((p, pi) => {
+        const bonded = isBonded(el.id, p.pid);
+        const ru = h('input', { type: 'number', class: 'num-input sm', step: 1, value: Math.round(p.u * 1000) });
+        ru.addEventListener('focus', () => snapshot());
+        ru.addEventListener('input', () => { const v = parseFloat(ru.value); if (isFinite(v)) { p.u = v / 1000; propagateJoint(el.id, p.pid); afterEdit(); } });
+        const rd = h('input', { type: 'number', class: 'num-input sm', step: 1, value: Math.round(p.d * 1000) });
+        rd.addEventListener('focus', () => snapshot());
+        rd.addEventListener('input', () => { const v = parseFloat(rd.value); if (isFinite(v)) { p.d = v / 1000; propagateJoint(el.id, p.pid); afterEdit(); } });
+        const ops = [
+          h('button', { class: 'el-btn', title: '下方插入', text: '＋', onclick: () => insertPoint(el, pi) }),
+          h('button', { class: 'el-btn', title: '刪除', text: '✕', onclick: () => deletePoint(el, pi) }) ];
+        if (bonded) ops.unshift(h('button', { class: 'el-btn', title: '解除相黏', text: '⛓', onclick: () => { snapshot(); detachVertex(el.id, p.pid); refreshEditor(); } }));
+        tbl.appendChild(h('div', { class: 'pt-row' }, [ h('span', { class: 'pt-idx', text: pi + 1 }), ru, rd, h('span', { class: 'pt-ops' }, ops) ]));
+      });
+      root.appendChild(tbl);
+    }
+  }
+
+  // （光源掛點移至「光源」分頁；此處同步其數值）
+  syncFixtureControls();
+  runLiveValidation();
+}
+
+// 範本按鈕（資料驅動）
+function renderTemplateButtons() {
+  const root = document.getElementById('cove-templates');
+  if (!root) return;
+  root.innerHTML = '';
+  Object.keys(TEMPLATE_LABELS).forEach(name => {
+    root.appendChild(h('button', { class: 'btn tmpl-btn', text: TEMPLATE_LABELS[name], onclick: () => applyTemplate(name) }));
+  });
+}
+
+// 匯入/匯出（form JSON）
+document.getElementById('profile-export').addEventListener('click', () => {
+  const json = JSON.stringify(serializeForm(), null, 2);
+  document.getElementById('profile-json').value = json;
+  const st = document.getElementById('profile-status');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(json).then(
+      () => { st.textContent = '✓ 已複製到剪貼簿'; st.className = 'hint ok'; },
+      () => { st.textContent = '已顯示於上方，可手動複製'; st.className = 'hint'; });
+  } else { st.textContent = '已顯示於上方，可手動複製'; st.className = 'hint'; }
+});
+document.getElementById('profile-import').addEventListener('click', () => {
+  const st = document.getElementById('profile-status');
+  const res = parseForm(document.getElementById('profile-json').value);
+  if (!res.ok) { st.textContent = '✗ ' + res.error; st.className = 'hint error'; return; }
+  activeFormName = null; savedFormJson = null;   // 匯入＝新草稿
+  applyForm(res.form);
+  st.textContent = '✓ 已匯入並套用'; st.className = 'hint ok';
+});
+
+// ══ 持久化：session 自動存檔 + 具名表單庫 ══════════════════════════
+const LS_SESSION = 'indirect-lighting:session@2';
+const LS_LIBRARY = 'indirect-lighting:cove-library@2';
+let activeFormName = null;   // 目前作用中的具名表單（null＝未命名草稿）
+let savedFormJson = null;    // 該具名表單儲存當下的快照，用於 dirty 判定
+
+let _storageFailed = false;
+function saveSession() {
+  try {
+    localStorage.setItem(LS_SESSION, JSON.stringify({
+      schema: 'session@2', savedAt: Date.now(),
+      room: S.room, refl: S.refl, wallReflect: S.wallReflect, sides: S.sides,
+      ray: S.ray, eye: S.eye, glare: S.glare, theme: S.theme,
+      activeFormName, savedFormJson,                       // 還原後可保留具名關聯與 dirty 判定
+      activeLightName, savedLightJson,
+      cove: { form: S.cove.form, light: S.cove.light },
+    }));
+    _storageFailed = false;
+  } catch (e) { _storageFailed = true; updateLibraryStatus(); if (typeof updateLightStatus === 'function') updateLightStatus(); } // 配額/隱私模式
+}
+let _saveTimer = null;
+function scheduleSave() { clearTimeout(_saveTimer); _saveTimer = setTimeout(saveSession, 400); }
+function loadSession() {
+  try {
+    const r = localStorage.getItem(LS_SESSION); if (!r) return false;
+    const d = JSON.parse(r); if (!d || d.schema !== 'session@2') return false;
+    if (d.cove && d.cove.form) { const v = validateForm(d.cove.form); if (!v.ok) return false; } // 毀損→不套用
+    ['room', 'refl', 'wallReflect', 'sides', 'ray', 'eye', 'glare'].forEach(k => { if (d[k]) Object.assign(S[k], d[k]); });
+    if (typeof d.theme === 'string') S.theme = d.theme;
+    if (d.cove) {
+      if (d.cove.form) S.cove.form = d.cove.form;
+      if (d.cove.light) Object.assign(S.cove.light, d.cove.light);
+      // 遷移：舊 session 把光源位置存在 form.fixture → 帶到 light.fixture
+      if (d.cove.light && !d.cove.light.fixture && d.cove.form && d.cove.form.fixture)
+        S.cove.light.fixture = { u: d.cove.form.fixture.u, d: d.cove.form.fixture.d };
+    }
+    if (typeof d.activeFormName === 'string') activeFormName = d.activeFormName;
+    if (typeof d.savedFormJson === 'string') savedFormJson = d.savedFormJson;
+    if (typeof d.activeLightName === 'string') activeLightName = d.activeLightName;
+    if (typeof d.savedLightJson === 'string') savedLightJson = d.savedLightJson;
+    return true;
+  } catch (e) { return false; }
+}
+
+function loadLibrary() {
+  try { const r = localStorage.getItem(LS_LIBRARY); const d = r ? JSON.parse(r) : null; return (d && Array.isArray(d.forms)) ? d.forms : []; }
+  catch (e) { return []; }
+}
+function saveLibrary(forms) {
+  try { localStorage.setItem(LS_LIBRARY, JSON.stringify({ schema: 'cove-library@2', forms })); _storageFailed = false; return true; }
+  catch (e) { _storageFailed = true; updateLibraryStatus(); return false; }
+}
+function updateLibraryStatus() {
+  const st = document.getElementById('lib-status'); if (!st) return;
+  if (_storageFailed) { st.textContent = '⚠ 本機儲存不可用（配額/隱私模式），本次變更不會保留'; st.className = 'hint error'; return; }
+  if (activeFormName) {
+    const dirty = JSON.stringify(S.cove.form) !== savedFormJson;
+    st.textContent = dirty ? `目前：${activeFormName}（已修改，未儲存）` : `目前：${activeFormName}（已同步）`;
+    st.className = dirty ? 'hint' : 'hint ok';
+  } else { st.textContent = '未命名模板（編輯會自動暫存，按「儲存」存入模板列表）'; st.className = 'hint'; }
+}
+function renderLibrary() {
+  const sel = document.getElementById('lib-select'); if (!sel) return;
+  const forms = loadLibrary();
+  sel.innerHTML = '';
+  forms.forEach(f => { const o = document.createElement('option'); o.value = f.name; o.textContent = f.name; sel.appendChild(o); });
+  if (activeFormName) sel.value = activeFormName;
+  const nameInp = document.getElementById('lib-name');
+  if (nameInp) { if (activeFormName) nameInp.value = activeFormName; else if (!nameInp.value) nameInp.value = nextUnnamedName('未命名模板', forms); }
+  updateLibraryStatus();
+}
+let _pendConfirm = null, _pendTimer = null;
+function pendConfirm(key, msg, statusId, refresh) {   // 兩段式確認：回傳 true 表示已確認可執行
+  const st = document.getElementById(statusId || 'lib-status');
+  if (_pendConfirm === key) { _pendConfirm = null; clearTimeout(_pendTimer); return true; }
+  _pendConfirm = key; clearTimeout(_pendTimer);
+  _pendTimer = setTimeout(() => { _pendConfirm = null; (refresh || updateLibraryStatus)(); }, 3000);
+  if (st) { st.textContent = msg; st.className = 'hint error'; }
+  return false;
+}
+// 下一個未命名名稱：prefix + 最小未使用編號
+function nextUnnamedName(prefix, forms) {
+  let n = 1; const names = new Set(forms.map(f => f.name));
+  while (names.has(prefix + n)) n++;
+  return prefix + n;
+}
+function libSaveAs() {
+  const st = document.getElementById('lib-status');
+  const name = (document.getElementById('lib-name').value || '').trim();
+  if (!name) { st.textContent = '✗ 請先輸入名稱'; st.className = 'hint error'; return; }
+  const forms = loadLibrary(), now = Date.now(), copy = JSON.parse(JSON.stringify(S.cove.form));
+  const existing = forms.find(f => f.name === name);
+  if (existing && !pendConfirm('save:' + name, `「${name}」已存在，再按一次「另存新檔」以覆蓋`)) return;
+  if (existing) { existing.form = copy; existing.updatedAt = now; }
+  else forms.push({ id: 'f' + now, name, createdAt: now, updatedAt: now, form: copy });
+  if (!saveLibrary(forms)) return;
+  activeFormName = name; savedFormJson = JSON.stringify(S.cove.form); renderLibrary();
+}
+function libSave() { if (!activeFormName) { libSaveAs(); return; } document.getElementById('lib-name').value = activeFormName; libSaveAs(); }
+function libLoad() {
+  const name = document.getElementById('lib-select').value;
+  const f = loadLibrary().find(x => x.name === name); if (!f) return;
+  activeFormName = name;
+  applyForm(JSON.parse(JSON.stringify(f.form)));
+  savedFormJson = JSON.stringify(S.cove.form);
+  document.getElementById('lib-name').value = name; renderLibrary();
+}
+function libDelete() {
+  const name = document.getElementById('lib-select').value; if (!name) return;
+  if (!pendConfirm('del:' + name, `再按一次「刪除」以確認刪除「${name}」`)) return;
+  saveLibrary(loadLibrary().filter(f => f.name !== name));
+  if (activeFormName === name) { activeFormName = null; savedFormJson = null; }
+  const ni = document.getElementById('lib-name'); if (ni && ni.value === name) ni.value = '';  // 清掉被刪名稱→改回預設
+  renderLibrary();
+}
+document.getElementById('lib-save').addEventListener('click', libSave);
+document.getElementById('lib-saveas').addEventListener('click', libSaveAs);
+document.getElementById('lib-load').addEventListener('click', libLoad);
+document.getElementById('lib-delete').addEventListener('click', libDelete);
+
+// ── 光源模板列表（與燈槽模板平行）──────────────────────────────────
+const LS_LIGHT_LIB = 'indirect-lighting:light-library@1';
+let activeLightName = null, savedLightJson = null;
+const lightSerialize = () => JSON.parse(JSON.stringify(S.cove.light));   // 深拷貝（含 fixture）
+function syncLightControls() {
+  const set = (id, val, unit, dec) => { const el = document.getElementById(id); if (el) el.value = val;
+    const vl = document.getElementById(id + '-val'); if (vl) vl.textContent = Number(val).toFixed(dec) + (unit ? ' ' + unit : ''); };
+  const L = S.cove.light;
+  set('emission-angle', L.emissionAngle, '°', 0); set('rotation-angle', L.rotationAngle, '°', 0);
+  set('light-kelvin', L.lightKelvin, 'K', 0); set('light-intensity', L.lightIntensity, '', 0);
+}
+function loadLightLib() { try { const r = localStorage.getItem(LS_LIGHT_LIB); const d = r ? JSON.parse(r) : null; return (d && Array.isArray(d.lights)) ? d.lights : []; } catch (e) { return []; } }
+function saveLightLib(lights) { try { localStorage.setItem(LS_LIGHT_LIB, JSON.stringify({ schema: 'light-library@1', lights })); _storageFailed = false; return true; } catch (e) { _storageFailed = true; updateLightStatus(); return false; } }
+function updateLightStatus() {
+  const st = document.getElementById('light-lib-status'); if (!st) return;
+  if (_storageFailed) { st.textContent = '⚠ 本機儲存不可用，本次變更不會保留'; st.className = 'hint error'; return; }
+  if (activeLightName) {
+    const dirty = JSON.stringify(lightSerialize()) !== savedLightJson;
+    st.textContent = dirty ? `目前：${activeLightName}（已修改，未儲存）` : `目前：${activeLightName}（已同步）`;
+    st.className = dirty ? 'hint' : 'hint ok';
+  } else { st.textContent = '未命名光源（按「儲存」存入光源列表）'; st.className = 'hint'; }
+}
+function renderLightLib() {
+  const sel = document.getElementById('light-lib-select'); if (!sel) return;
+  const lights = loadLightLib();
+  sel.innerHTML = '';
+  lights.forEach(l => { const o = document.createElement('option'); o.value = l.name; o.textContent = l.name; sel.appendChild(o); });
+  if (activeLightName) sel.value = activeLightName;
+  const nameInp = document.getElementById('light-lib-name');
+  if (nameInp) { if (activeLightName) nameInp.value = activeLightName; else if (!nameInp.value) nameInp.value = nextUnnamedName('未命名光源', lights); }
+  updateLightStatus();
+}
+function lightSaveAs() {
+  const st = document.getElementById('light-lib-status');
+  const name = (document.getElementById('light-lib-name').value || '').trim();
+  if (!name) { st.textContent = '✗ 請先輸入名稱'; st.className = 'hint error'; return; }
+  const lights = loadLightLib(), now = Date.now(), data = lightSerialize();
+  const existing = lights.find(l => l.name === name);
+  if (existing && !pendConfirm('lsave:' + name, `「${name}」已存在，再按一次「另存新檔」以覆蓋`, 'light-lib-status', updateLightStatus)) return;
+  if (existing) { existing.light = data; existing.updatedAt = now; }
+  else lights.push({ id: 'L' + now, name, createdAt: now, updatedAt: now, light: data });
+  if (!saveLightLib(lights)) return;
+  activeLightName = name; savedLightJson = JSON.stringify(data); renderLightLib();
+}
+function lightSave() { if (!activeLightName) { lightSaveAs(); return; } document.getElementById('light-lib-name').value = activeLightName; lightSaveAs(); }
+function lightLoad() {
+  const name = document.getElementById('light-lib-select').value;
+  const l = loadLightLib().find(x => x.name === name); if (!l) return;
+  activeLightName = name; Object.assign(S.cove.light, JSON.parse(JSON.stringify(l.light))); savedLightJson = JSON.stringify(lightSerialize());
+  syncLightControls(); syncFixtureControls(); redraw();
+  document.getElementById('light-lib-name').value = name; renderLightLib();
+}
+function lightDelete() {
+  const name = document.getElementById('light-lib-select').value; if (!name) return;
+  if (!pendConfirm('ldel:' + name, `再按一次「刪除」以確認刪除「${name}」`, 'light-lib-status', updateLightStatus)) return;
+  saveLightLib(loadLightLib().filter(l => l.name !== name));
+  if (activeLightName === name) { activeLightName = null; savedLightJson = null; }
+  const ni = document.getElementById('light-lib-name'); if (ni && ni.value === name) ni.value = '';
+  renderLightLib();
+}
+document.getElementById('light-lib-save').addEventListener('click', lightSave);
+document.getElementById('light-lib-saveas').addEventListener('click', lightSaveAs);
+document.getElementById('light-lib-load').addEventListener('click', lightLoad);
+document.getElementById('light-lib-delete').addEventListener('click', lightDelete);
+
+// 光源掛點（資料屬 S.cove.light.fixture；與燈槽分離；UI 在光源分頁）
+function syncFixtureControls() {
+  const f = S.cove.light.fixture;
+  const fu = document.getElementById('fixture-u'), fd = document.getElementById('fixture-d');
+  if (fu && document.activeElement !== fu) fu.value = Math.round(f.u * 1000);
+  if (fd && document.activeElement !== fd) fd.value = Math.round(f.d * 1000);
+}
+(function bindFixture() {
+  const fu = document.getElementById('fixture-u'), fd = document.getElementById('fixture-d');
+  const upd = () => { redraw(); if (typeof updateLightStatus === 'function') updateLightStatus(); };
+  if (fu) fu.addEventListener('input', () => { const v = parseFloat(fu.value); if (isFinite(v)) { S.cove.light.fixture.u = v / 1000; upd(); } });
+  if (fd) fd.addEventListener('input', () => { const v = parseFloat(fd.value); if (isFinite(v)) { S.cove.light.fixture.d = v / 1000; upd(); } });
+})();
+
+// 將整份狀態同步回各分頁控件（session 還原後呼叫）
+function syncAllControls() {
+  const set = (id, val, unit, dec) => { const el = document.getElementById(id); if (el) el.value = val;
+    const vl = document.getElementById(id + '-val'); if (vl) vl.textContent = Number(val).toFixed(dec) + (unit ? ' ' + unit : ''); };
+  const chk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = v; };
+  set('room-width', S.room.W * 1000, 'mm', 0); set('room-height', S.room.H * 1000, 'mm', 0);
+  set('refl-ceiling', S.refl.ceiling, '', 2); set('refl-wall', S.refl.wall, '', 2); set('refl-floor', S.refl.floor, '', 2);
+  chk('wall-refl-left', S.wallReflect.left); chk('wall-refl-right', S.wallReflect.right);
+  chk('side-left', S.sides.left); chk('side-right', S.sides.right);
+  set('ray-density', S.ray.density, '條', 0); set('ray-bounces', S.ray.bounces, '次', 0);
+  set('eye-height', S.eye.height * 1000, 'mm', 0); set('eye-x', S.eye.xRatio, '', 2); chk('eye-show', S.eye.show);
+  set('glare-width', S.glare.width * 1000, 'mm', 0); set('glare-height', S.glare.height * 1000, 'mm', 0);
+  const gh = document.getElementById('glare-hanchor'); if (gh) gh.value = S.glare.hAnchor;
+  const gv = document.getElementById('glare-vanchor'); if (gv) gv.value = S.glare.vAnchor;
+  chk('theme-light', S.theme === 'light');
+  set('emission-angle', S.cove.light.emissionAngle, '°', 0); set('rotation-angle', S.cove.light.rotationAngle, '°', 0);
+  set('light-kelvin', S.cove.light.lightKelvin, 'K', 0); set('light-intensity', S.cove.light.lightIntensity, '', 0);
+}
+
+loadSession();                       // 還原上次 session（毀損則保留預設經典）
+// 作用中名稱若已不在庫中（他處刪除）→ 視為未命名草稿，避免狀態誤報
+if (activeFormName && !loadLibrary().some(f => f.name === activeFormName)) { activeFormName = null; savedFormJson = null; }
+if (activeLightName && !loadLightLib().some(l => l.name === activeLightName)) { activeLightName = null; savedLightJson = null; }
+ensureUniqueIds(S.cove.form);
+selectedElementId = (S.cove.form.elements[0] || {}).id || null;
+syncAllControls();
+renderTemplateButtons();
+renderLibrary();
+renderCoveEditor();
+renderLightLib();
+const lightChanged = () => { if (typeof updateLightStatus === 'function') updateLightStatus(); };
+bindSlider('emission-angle', 'emission-angle-val', '°', 0, v => { S.cove.light.emissionAngle = v; lightChanged(); });
+bindSlider('rotation-angle', 'rotation-angle-val', '°', 0, v => { S.cove.light.rotationAngle = v; lightChanged(); });
+bindSlider('light-kelvin',   'light-kelvin-val',   'K', 0, v => { S.cove.light.lightKelvin   = v; lightChanged(); });
+bindSlider('light-intensity', 'light-intensity-val', '', 0, v => { S.cove.light.lightIntensity = v; lightChanged(); });
 bindSlider('ray-density',  'ray-density-val',  '條', 0, v => { S.ray.density  = v; });
 bindSlider('ray-bounces',  'ray-bounces-val',  '次', 0, v => { S.ray.bounces  = v; });
 
@@ -820,19 +1777,270 @@ canvas.addEventListener('wheel', (e) => {
   zoomAt(sx, sy, e.deltaY < 0 ? 1.12 : 1 / 1.12);
 }, { passive: false });
 
-// 滑鼠拖曳平移
+// ── 編輯拖曳 + 平移 ──────────────────────────────────────────────
+const coveTabActive = () => { const t = document.getElementById('tab-cove'); return t && t.classList.contains('active'); };
+const lightTabActive = () => { const t = document.getElementById('tab-light'); return t && t.classList.contains('active'); };
+const evScreen = (e) => { const r = canvas.getBoundingClientRect(), k = canvas.width / (r.width || 1); return { sx: (e.clientX - r.left) * k, sy: (e.clientY - r.top) * k }; };
+// 螢幕 → 局部 (u,d)：依側別還原鏡像
+function screenToLocal(sx, sy, side) {
+  const { W, H } = S.room;
+  const x = (sx - _ox) / _scale, y = (_oy - sy) / _scale;
+  return { u: side === 'L' ? x : W - x, d: H - y };
+}
+const SNAP = 0.005;                                   // 5mm 格線吸附
+const snapV = (v) => Math.round(v / SNAP) * SNAP;
+const HANDLE_PX = 10;
+// 命中把手（選取元件頂點 / 光源把手）→ {kind, side, el, pi} 或 null
+function pickHandle(sx, sy) {
+  const { W, H } = S.room;
+  const sides = []; if (S.sides.left) sides.push('L'); if (S.sides.right) sides.push('R');
+  let best = null, bestD = HANDLE_PX;
+  // 光源把手：僅在「光源」分頁可拖曳
+  if (lightTabActive()) {
+    const fx = S.cove.light.fixture;
+    for (const side of sides) {
+      const w = toWorld(fx.u, fx.d, side, W, H);
+      const dd = Math.hypot(mx(w.x) - sx, my(w.y) - sy);
+      if (dd < bestD) { bestD = dd; best = { kind: 'fixture', side }; }
+    }
+    return best;
+  }
+  // 頂點/弧端點：僅在「燈槽」分頁
+  if (!coveTabActive()) return null;
+  const el = S.cove.form.elements.find(e => e.id === selectedElementId);
+  if (el && !el.hidden) {
+    if (el.path.kind === 'arc') {
+      arcEndpoints(el.path).forEach((p, which) => {
+        for (const side of sides) {
+          const w = toWorld(p.u, p.d, side, W, H);
+          const dd = Math.hypot(mx(w.x) - sx, my(w.y) - sy);
+          if (dd < bestD) { bestD = dd; best = { kind: 'arcEnd', side, el, which }; }
+        }
+      });
+    } else {
+      el.path.points.forEach((p, pi) => {
+        for (const side of sides) {
+          const w = toWorld(p.u, p.d, side, W, H);
+          const dd = Math.hypot(mx(w.x) - sx, my(w.y) - sy);
+          if (dd < bestD) { bestD = dd; best = { kind: 'vertex', side, el, pi }; }
+        }
+      });
+    }
+  }
+  return best;
+}
+// 與某頂點重合的「其他元件」頂點（局部座標 1e-4 內）
+function coincidentVertices(elId, pt) {
+  const out = [];
+  if (!pt) return out;
+  for (const el of S.cove.form.elements) {
+    if (el.id === elId || el.path.kind === 'arc') continue;
+    for (const p of el.path.points) if (Math.hypot(p.u - pt.u, p.d - pt.d) < 1e-4) out.push({ el: el.id, pid: p.pid });
+  }
+  return out;
+}
+// 拖曳吸附：找最近「其他頂點」（10px 內，跨元件/側別），回傳其局部座標 + {el,pid}；exclude 內者不吸附
+function findSnapTarget(sx, sy, dragEl, dragPid, exclude) {
+  const { W, H } = S.room; const sides = []; if (S.sides.left) sides.push('L'); if (S.sides.right) sides.push('R');
+  let best = null, bestD = HANDLE_PX;
+  for (const el of S.cove.form.elements) {
+    if (el.hidden || el.path.kind === 'arc' || el.id === dragEl.id) continue;  // 不與同元件相黏（避免塌陷）
+    for (const p of el.path.points) {
+      if (exclude && exclude.some(x => x.el === el.id && x.pid === p.pid)) continue;
+      for (const side of sides) {
+        const w = toWorld(p.u, p.d, side, W, H);
+        const dd = Math.hypot(mx(w.x) - sx, my(w.y) - sy);
+        if (dd < bestD) { bestD = dd; best = { el, pid: p.pid, u: p.u, d: p.d }; }
+      }
+    }
+  }
+  return best;
+}
+// 點是否在多邊形內（世界座標 ray-casting）
+function pointInPoly(x, y, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i].x, yi = pts[i].y, xj = pts[j].x, yj = pts[j].y;
+    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
+  }
+  return inside;
+}
+// 點到線段距離（螢幕像素）
+function distToSeg(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+  let t = l2 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0; t = clamp(t, 0, 1);
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+// 細長面板：游標是否靠近其中心線（螢幕 6px 內）
+function nearCenterline(el, side, sx, sy) {
+  const { W, H } = S.room, pts = elementCenterline(el).map(p => { const w = toWorld(p.u, p.d, side, W, H); return { x: mx(w.x), y: my(w.y) }; });
+  for (let i = 0; i < pts.length - 1; i++) if (distToSeg(sx, sy, pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y) <= 6) return true;
+  return false;
+}
+// 命中元件本體 → {el, side}；元件由上而下（清單後者在上），側別右先於左（繪製順序）
+function pickBody(sx, sy) {
+  if (!coveTabActive() || !_scene) return null;
+  const wx = (sx - _ox) / _scale, wy = (_oy - sy) / _scale;
+  const els = S.cove.form.elements;
+  for (let i = els.length - 1; i >= 0; i--) {
+    const el = els[i]; if (el.hidden) continue;
+    for (const sc of [_scene.rightCove, _scene.leftCove]) {
+      if (!sc) continue;
+      const loop = sc.loops.find(l => l.id === el.id);
+      const inside = loop && pointInPoly(wx, wy, loop.pts);
+      const onLine = el.kind !== 'polygon' && nearCenterline(el, sc.side, sx, sy);  // 細長面板/弧線沿線可抓
+      if (inside || onLine) return { el, side: sc.side };
+    }
+  }
+  return null;
+}
+
+// ── Undo / Redo（form 快照）──
+let undoStack = [], redoStack = [];
+function snapshot() {
+  const cur = JSON.stringify(S.cove.form);
+  if (undoStack.length && undoStack[undoStack.length - 1] === cur) return; // 去重，避免重複/無變更快照
+  undoStack.push(cur); if (undoStack.length > 60) undoStack.shift(); redoStack = [];
+}
+function restoreForm(json) {
+  S.cove.form = JSON.parse(json);
+  const sel = S.cove.form.elements.find(e => e.id === selectedElementId);
+  selectedElementId = sel ? sel.id : (S.cove.form.elements[0] || {}).id || null;
+  refreshEditor();
+}
+function undo() { if (!undoStack.length) return; redoStack.push(JSON.stringify(S.cove.form)); restoreForm(undoStack.pop()); }
+function redo() { if (!redoStack.length) return; undoStack.push(JSON.stringify(S.cove.form)); restoreForm(redoStack.pop()); }
+window.addEventListener('keydown', (e) => {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  if (!coveTabActive()) return;   // 復原僅作用於燈槽幾何編輯
+  const k = e.key.toLowerCase();
+  if (k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
+  else if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); redo(); }
+});
+
+// 方向鍵微調選取元件（焦點不在輸入欄位時）：1mm，Shift=10mm
+let _nudgeActive = false, _nudgeTimer = null;
+function nudgeSelected(du, dd) {
+  const el = S.cove.form.elements.find(e => e.id === selectedElementId);
+  if (!el || el.hidden) return false;
+  if (!_nudgeActive) { snapshot(); _nudgeActive = true; }   // 連續微調算一次 Undo
+  clearTimeout(_nudgeTimer); _nudgeTimer = setTimeout(() => { _nudgeActive = false; renderCoveEditor(); }, 600);
+  const mv = (p) => { p.u = clamp(p.u + du, -0.05, S.room.W); p.d = clamp(p.d + dd, 0, S.room.H); };
+  if (el.path.kind === 'arc') mv(el.path.center);
+  else { el.path.points.forEach(mv); propagateElementJoints(el.id); }   // 相黏夥伴跟著移動
+  redraw();
+  return true;
+}
+window.addEventListener('keydown', (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (!coveTabActive() || !selectedElementId) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA')) return; // 欄位內 → 交給欄位
+  const step = e.shiftKey ? 0.01 : 0.001;
+  let handled = false;
+  if (e.key === 'ArrowRight') handled = nudgeSelected(step, 0);
+  else if (e.key === 'ArrowLeft') handled = nudgeSelected(-step, 0);
+  else if (e.key === 'ArrowDown') handled = nudgeSelected(0, step);
+  else if (e.key === 'ArrowUp') handled = nudgeSelected(0, -step);
+  if (handled) e.preventDefault();
+});
+
+// ── 滑鼠：拖曳把手 / 平移 ──
 let _dragging = false, _lastX = 0, _lastY = 0;
+let dragState = null, dragBadge = null;
 canvas.addEventListener('mousedown', (e) => {
+  const { sx, sy } = evScreen(e);
+  const hit = pickHandle(sx, sy);
+  if (hit) {
+    if (hit.kind !== 'fixture') snapshot();   // 光源拖曳屬光源、不進燈槽 Undo
+    if (hit.kind === 'vertex') {
+      const pt = hit.el.path.points[hit.pi];
+      // Alt + 拖曳相黏頂點 → 先解除相黏，再自由移動
+      if (e.altKey && pt && isBonded(hit.el.id, pt.pid)) detachVertex(hit.el.id, pt.pid);
+      // 拖曳起點即與某些「其他元件頂點」重合者 → 本次拖曳不再吸附它們（解除後可拉開、不再黏回）
+      hit.excludeSnap = coincidentVertices(hit.el.id, pt);
+    }
+    dragState = hit; _dragging = false; canvas.style.cursor = 'grabbing'; return;
+  }
+  const body = pickBody(sx, sy);   // 點在元件本體內 → 選取並整體搬移
+  if (body) {
+    snapshot();
+    selectedElementId = body.el.id;
+    const loc = screenToLocal(sx, sy, body.side);
+    dragState = { kind: 'body', side: body.side, el: body.el, startU: loc.u, startD: loc.d, orig: JSON.parse(JSON.stringify(body.el.path)) };
+    renderCoveEditor(); redraw(); canvas.style.cursor = 'grabbing'; return;
+  }
   _dragging = true; _lastX = e.clientX; _lastY = e.clientY; canvas.style.cursor = 'grabbing';
 });
 window.addEventListener('mousemove', (e) => {
+  if (dragState) {
+    if (dragState.el && !S.cove.form.elements.includes(dragState.el)) { endDrag(); return; } // 元件已被刪除
+    const { sx, sy } = evScreen(e);
+    const loc = screenToLocal(sx, sy, dragState.side);
+    if (dragState.kind === 'arcEnd') {
+      // 拖曳端點 = 調整角度（圓心、半徑不變）。以「解纏繞」避免跨 ±180 時掃掠角暴衝/反向。
+      const a = dragState.el.path;
+      const raw = Math.round(Math.atan2(loc.d - a.center.d, loc.u - a.center.u) * 180 / Math.PI);
+      const clampSweep = (s) => (s >= 0 ? 1 : -1) * clamp(Math.abs(s), 1, 350);  // 避免 0/≥360 退化
+      if (dragState.which === 0) {
+        const oldEnd = a.startDeg + a.sweepDeg;
+        const ns = unwrapAngle(raw, a.startDeg);          // 接近原起始角的等價角
+        a.startDeg = ns; a.sweepDeg = clampSweep(oldEnd - ns);
+      } else {
+        const ne = unwrapAngle(raw, a.startDeg + a.sweepDeg);
+        a.sweepDeg = clampSweep(ne - a.startDeg);
+      }
+      dragBadge = { sx, sy, text: `掃掠 ${Math.round(a.sweepDeg)}°` };
+      redraw(); return;
+    }
+    if (dragState.kind === 'body') {
+      // 整體搬移：以快照原始路徑 + 吸附後位移（保留 pid）
+      const du = snapV(loc.u - dragState.startU), dd = snapV(loc.d - dragState.startD), o = dragState.orig, el = dragState.el;
+      if (el.path.kind === 'arc') el.path.center = { u: o.center.u + du, d: o.center.d + dd };
+      else { el.path.points = o.points.map(p => ({ pid: p.pid, u: clamp(p.u + du, -0.05, S.room.W), d: clamp(p.d + dd, 0, S.room.H) })); propagateElementJoints(el.id); }
+      dragBadge = { sx, sy, text: `移動 Δu ${Math.round(du * 1000)}, Δd ${Math.round(dd * 1000)} mm` };
+      redraw(); return;
+    }
+    // 夾在合理局部範圍：u ∈ [-50mm, 室寬]，d ∈ [0, 室高]
+    const u = clamp(snapV(loc.u), -0.05, S.room.W);
+    const d = clamp(snapV(loc.d), 0, S.room.H);
+    if (dragState.kind === 'vertex') {
+      const pt = dragState.el.path.points[dragState.pi];                    // 原地改值，保留 pid
+      const snap = e.altKey ? null : findSnapTarget(sx, sy, dragState.el, pt.pid, dragState.excludeSnap);  // Alt=不吸附
+      if (snap) { pt.u = snap.u; pt.d = snap.d; dragState.snap = snap; dragBadge = { sx, sy, text: '放開即相黏 ⛓' }; }
+      else { pt.u = u; pt.d = d; dragState.snap = null; dragBadge = { sx, sy, text: `u ${Math.round(u * 1000)}, d ${Math.round(d * 1000)} mm` }; }
+      propagateJoint(dragState.el.id, pt.pid);
+    } else {   // fixture（光源分頁）→ 改 S.cove.light.fixture，標記光源已修改
+      S.cove.light.fixture = { u, d }; dragBadge = { sx, sy, text: `u ${Math.round(u * 1000)}, d ${Math.round(d * 1000)} mm` };
+      if (typeof updateLightStatus === 'function') updateLightStatus();
+    }
+    redraw();
+    return;
+  }
   if (!_dragging) return;
   const k = _vpScale();
   _panX += (e.clientX - _lastX) * k; _panY += (e.clientY - _lastY) * k;
   _lastX = e.clientX; _lastY = e.clientY;
   clampPan(); redraw();
 });
-window.addEventListener('mouseup', () => { _dragging = false; canvas.style.cursor = 'grab'; });
+function endDrag() {
+  if (dragState) {
+    if (dragState.kind === 'vertex' && dragState.snap) {   // 放開於吸附目標 → 相黏
+      const pt = dragState.el.path.points[dragState.pi];
+      if (pt) bondVertices({ el: dragState.el.id, pid: pt.pid }, { el: dragState.snap.el.id, pid: dragState.snap.pid });
+    }
+    dragState = null; dragBadge = null; canvas.style.cursor = 'grab'; renderCoveEditor(); redraw();
+  }
+  _dragging = false; canvas.style.cursor = 'grab';
+}
+window.addEventListener('mouseup', endDrag);
+window.addEventListener('blur', endDrag);   // 視窗失焦/滑鼠移出時結束拖曳，避免卡住
+// hover：在把手或元件本體上顯示可拖曳游標
+canvas.addEventListener('mousemove', (e) => {
+  if (dragState || _dragging) return;
+  const { sx, sy } = evScreen(e);
+  canvas.style.cursor = (pickHandle(sx, sy) || pickBody(sx, sy)) ? 'move' : 'grab';
+});
 
 // 觸控：單指平移、雙指縮放
 let _touchMode = null, _tLastX = 0, _tLastY = 0, _tStartDist = 0, _tStartZoom = 1;
