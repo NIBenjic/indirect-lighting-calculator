@@ -798,6 +798,7 @@ bindSlider('ray-bounces',  'ray-bounces-val',  '次', 0, v => { S.ray.bounces  =
 
 // 視角
 document.getElementById('theme-light').addEventListener('change', e => { S.theme = e.target.checked ? 'light' : 'dark'; redraw(); });
+document.getElementById('legend-show').addEventListener('change', e => { document.getElementById('legend-block').style.display = e.target.checked ? '' : 'none'; });
 document.getElementById('eye-show').addEventListener('change', e => { S.eye.show = e.target.checked; redraw(); });
 bindSlider('eye-height', 'eye-height-val', 'mm', 0, v => { S.eye.height = v / 1000; });
 bindSlider('eye-x',      'eye-x-val',      '', 2,  v => { S.eye.xRatio = v; });

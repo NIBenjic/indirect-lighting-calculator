@@ -454,7 +454,11 @@
 
         <div class="section">
           <div class="section-title">圖例說明</div>
-          <div class="legend-block">
+          <div class="toggle-row">
+            <span class="control-label">顯示圖例</span>
+            <label class="toggle"><input type="checkbox" id="legend-show" checked><span class="toggle-slider"></span></label>
+          </div>
+          <div class="legend-block" id="legend-block">
             <div><span style="color:#fd0">━ 光源射線</span> 顏色隨色溫/亮度，依反光衰減</div>
             <div><span style="color:#fd0">● 光源位置</span> 光暈顏色隨色溫/亮度</div>
             <div><span style="color:#f55">┄ 紅色視線</span> 觀察者直視光源（眩光）</div>
@@ -463,6 +467,11 @@
             <div><span style="color:#fd0">▢ 邊界框</span> 燈具裸露邊界（眩光判定範圍，隨色溫）</div>
             <div><span style="color:#4cf">● 藍色圓點</span> 觀察者眼睛位置</div>
             <div><span style="color:#bbb">┄ 眼高水平線</span> 觀察者眼睛高度（隨主題色）</div>
+            <div style="margin-top:6px;border-top:1px solid #2e2e2e;padding-top:6px"><span style="color:#d7d2c3">▭ 天花板</span> 室內反光面（薄帶）</div>
+            <div><span style="color:#b9b9b9">▭ 牆面</span> 室內反光面（薄帶）</div>
+            <div><span style="color:#968264">▭ 地板</span> 室內反光面（薄帶）</div>
+            <div><span style="color:#c0c0c0">▭ 燈槽結構</span> 底板／擋板</div>
+            <div><span style="color:#82919b">━ 尺寸標注</span> 室寬 W／室高 H</div>
           </div>
         </div>
       </div>
