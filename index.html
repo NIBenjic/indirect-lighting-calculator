@@ -33,7 +33,18 @@
       font-weight: 600;
       letter-spacing: .3px;
       color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      user-select: none;
     }
+    #panel-toggle {
+      display: none;            /* 桌面隱藏，手機版顯示 */
+      font-size: 14px;
+      color: #4fc3f7;
+      transition: transform .25s;
+    }
+    #panel.collapsed #panel-toggle { transform: rotate(180deg); }
     #panel-tabs {
       display: flex;
       background: #1e1e1e;
@@ -117,6 +128,19 @@
       accent-color: #4fc3f7;
       cursor: pointer;
     }
+    .select-input {
+      flex: 1;
+      min-width: 0;
+      background: #1a1a1a;
+      border: 1px solid #333;
+      color: #cfd2d6;
+      font-size: 11px;
+      padding: 3px 6px;
+      border-radius: 4px;
+      outline: none;
+      cursor: pointer;
+    }
+    .select-input:focus { border-color: #4fc3f7; }
     .toggle-row {
       display: flex;
       align-items: center;
@@ -167,6 +191,56 @@
       display: block;
       width: 100%;
       height: 100%;
+      touch-action: none;       /* 由 JS 接管縮放/平移手勢 */
+    }
+
+    /* ── Zoom controls ── */
+    #zoom-controls {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      z-index: 10;
+    }
+    #zoom-controls button {
+      width: 34px;
+      height: 34px;
+      border: 1px solid #333;
+      background: rgba(36,36,36,0.85);
+      color: #e0e0e0;
+      font-size: 18px;
+      line-height: 1;
+      border-radius: 7px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background .15s, color .15s;
+    }
+    #zoom-controls button:hover  { background: rgba(79,195,247,0.25); color: #fff; }
+    #zoom-controls button:active { background: rgba(79,195,247,0.40); }
+
+    /* ── Mobile: 底部浮動收合設定面板 ── */
+    @media (max-width: 820px) {
+      body { flex-direction: column; }
+      #panel {
+        position: fixed;
+        left: 0; right: 0; bottom: 0;
+        width: 100%;
+        min-width: 0;
+        max-height: 60vh;
+        border-right: none;
+        border-top: 1px solid #333;
+        border-radius: 14px 14px 0 0;
+        box-shadow: 0 -6px 24px rgba(0,0,0,0.55);
+        transition: transform .25s ease;
+        z-index: 30;
+      }
+      #panel.collapsed { transform: translateY(calc(100% - 45px)); }
+      #panel-toggle { display: inline; }
+      #panel-body { max-height: calc(60vh - 92px); }
     }
   </style>
 </head>
@@ -174,7 +248,7 @@
 
   <!-- Control Panel -->
   <aside id="panel">
-    <div id="panel-header">間接照明剖面模擬器</div>
+    <div id="panel-header"><span>間接照明剖面模擬器</span><span id="panel-toggle" aria-hidden="true">▾</span></div>
     <div id="panel-tabs">
       <button class="tab-btn active" data-tab="space">空間</button>
       <button class="tab-btn" data-tab="cove">燈槽</button>
@@ -209,6 +283,14 @@
             <span class="control-label">牆壁</span>
             <input type="range" id="refl-wall" min="0" max="1" step="0.01" value="0.75">
             <span class="control-value" id="refl-wall-val">0.75</span>
+          </div>
+          <div class="toggle-row">
+            <span class="control-label">左牆反射（槽外）</span>
+            <label class="toggle"><input type="checkbox" id="wall-refl-left" checked><span class="toggle-slider"></span></label>
+          </div>
+          <div class="toggle-row">
+            <span class="control-label">右牆反射（槽外）</span>
+            <label class="toggle"><input type="checkbox" id="wall-refl-right" checked><span class="toggle-slider"></span></label>
           </div>
           <div class="control-row">
             <span class="control-label">地板</span>
@@ -315,6 +397,14 @@
       <!-- ── Tab: View ── -->
       <div class="tab-content" id="tab-view">
         <div class="section">
+          <div class="section-title">背景</div>
+          <div class="toggle-row">
+            <span class="control-label">淺色背景</span>
+            <label class="toggle"><input type="checkbox" id="theme-light"><span class="toggle-slider"></span></label>
+          </div>
+        </div>
+
+        <div class="section">
           <div class="section-title">眼睛視角</div>
           <div class="toggle-row">
             <span class="control-label">顯示視線</span>
@@ -327,8 +417,38 @@
           </div>
           <div class="control-row">
             <span class="control-label">水平位置</span>
-            <input type="range" id="eye-x" min="0.05" max="0.95" step="0.05" value="0.5">
+            <input type="range" id="eye-x" min="0" max="1" step="0.01" value="0.5">
             <span class="control-value" id="eye-x-val">0.50</span>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">眩光偵測（燈具裸露邊界）</div>
+          <div class="control-row">
+            <span class="control-label">邊界寬</span>
+            <input type="range" id="glare-width" min="0" max="500" step="5" value="80">
+            <span class="control-value" id="glare-width-val">80 mm</span>
+          </div>
+          <div class="control-row">
+            <span class="control-label">邊界高</span>
+            <input type="range" id="glare-height" min="0" max="500" step="5" value="40">
+            <span class="control-value" id="glare-height-val">40 mm</span>
+          </div>
+          <div class="control-row">
+            <span class="control-label">水平基準</span>
+            <select id="glare-hanchor" class="select-input">
+              <option value="wall">靠牆（向室內延伸）</option>
+              <option value="center">置中</option>
+              <option value="interior">靠室內（向牆延伸）</option>
+            </select>
+          </div>
+          <div class="control-row">
+            <span class="control-label">垂直基準</span>
+            <select id="glare-vanchor" class="select-input">
+              <option value="center">置中</option>
+              <option value="top">上（向下延伸）</option>
+              <option value="bottom">下（向上延伸）</option>
+            </select>
           </div>
         </div>
 
@@ -341,6 +461,7 @@
             <div><span style="color:#4cf">● 藍色圓點</span> 觀察者眼睛位置</div>
             <div><span style="color:#fff">── 白色虛線</span> 眼高水平線</div>
             <div><span style="color:#fa0">- - 橘色虛線</span> 遮光截止角 / 安全距離</div>
+            <div><span style="color:#fd0">▢ 黃色框</span> 燈具裸露邊界（眩光判定範圍）</div>
           </div>
         </div>
       </div>
@@ -351,6 +472,11 @@
   <!-- Main 2D Canvas -->
   <main id="viewport">
     <canvas id="main-canvas"></canvas>
+    <div id="zoom-controls">
+      <button id="zoom-in"  title="放大">＋</button>
+      <button id="zoom-out" title="縮小">－</button>
+      <button id="zoom-reset" title="重設視圖">⟲</button>
+    </div>
   </main>
 
   <script type="module" src="/src/main.js"></script>

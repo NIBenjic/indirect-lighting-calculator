@@ -19,13 +19,23 @@ const S = {
     lightKelvin: 3000, lightIntensity: 800,
   },
   sides: { left: true, right: true },
+  wallReflect: { left: true, right: true }, // 槽外主牆面是否反射（關閉＝光線完全穿透）
   refl:  { ceiling: 0.85, wall: 0.75, floor: 0.35 },
   ray:   { density: 20, bounces: 3 },
   eye:   { height: 1.65, xRatio: 0.50, show: true },
+  glare: { width: 0.08, height: 0.04, hAnchor: 'wall', vAnchor: 'center' }, // 燈具裸露邊界（公尺）＋基準角
+  theme: 'dark',
 };
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const THICK = 0.015; // 材料厚度 15mm (公尺)
+
+// 背景主題（深色 / 淺色）：僅影響背景與中性線條，語意化的射線/標示色不變
+const THEMES = {
+  dark:  { bg: '#0d1015', border: '#3a4248', eyeLine: 'rgba(255,255,255,0.15)' },
+  light: { bg: '#eef1f4', border: '#9aa4ac', eyeLine: 'rgba(0,0,0,0.18)'      },
+};
+const theme = () => THEMES[S.theme] || THEMES.dark;
 
 // 依燈槽幾何與側別計算光源座標（公尺）。距後牆與距底板皆夾在槽內。
 function lightPos(cove, side, W) {
@@ -34,6 +44,25 @@ function lightPos(cove, side, W) {
   const lx = side === 'L' ? wd : W - wd;
   const ly = cove.bottomY + pd;
   return { lx, ly };
+}
+
+// 燈具裸露邊界矩形（公尺）：以光源 (lx,ly) 為基準角，依水平/垂直基準設定延伸。
+//   hAnchor: 'wall' 靠牆（向室內延伸）/ 'center' 置中 / 'interior' 靠室內（向牆延伸）
+//   vAnchor: 'top' 上（向下延伸）/ 'center' 置中 / 'bottom' 下（向上延伸）
+function glareBox(lx, ly, side) {
+  const gW = Math.max(0, S.glare.width), gH = Math.max(0, S.glare.height);
+  const inward = side === 'L' ? 1 : -1;   // 朝室內的 x 方向
+  let x0, x1;
+  if (S.glare.hAnchor === 'center') { x0 = lx - gW / 2; x1 = lx + gW / 2; }
+  else {
+    const dir = (S.glare.hAnchor === 'wall' ? inward : -inward);
+    x0 = Math.min(lx, lx + dir * gW); x1 = Math.max(lx, lx + dir * gW);
+  }
+  let y0, y1;
+  if (S.glare.vAnchor === 'top')         { y0 = ly - gH; y1 = ly; }
+  else if (S.glare.vAnchor === 'bottom') { y0 = ly;      y1 = ly + gH; }
+  else                                   { y0 = ly - gH / 2; y1 = ly + gH / 2; }
+  return { x0, x1, y0, y1 };
 }
 
 // 光源顯示色：色相完全依色溫（與 kelvinToColor 一致），亮度僅影響
@@ -61,20 +90,54 @@ function resizeCanvas() {
 }
 window.addEventListener('resize', resizeCanvas);
 
-// ══ 座標映射 ══════════════════════════════════════════════════════
+// ══ 座標映射（含使用者縮放/平移）══════════════════════════════════
 let _scale = 1, _ox = 0, _oy = 0;
+let _zoom = 1, _panX = 0, _panY = 0;   // 使用者縮放倍率與平移量（螢幕像素）
+const ZOOM_MIN = 1, ZOOM_MAX = 12;
 
 function setupCoords(CW, CH) {
   const { W, H } = S.room;
   const pL = 58, pR = 44, pT = 38, pB = 52;
-  const scale = Math.max(0, Math.min((CW - pL - pR) / W, (CH - pT - pB) / H));
-  _scale = scale;
-  _ox = pL + ((CW - pL - pR) - scale * W) / 2;
-  _oy = pT + ((CH - pT - pB) - scale * H) / 2 + scale * H;
+  const baseScale = Math.max(0, Math.min((CW - pL - pR) / W, (CH - pT - pB) / H));
+  const baseOx = pL + ((CW - pL - pR) - baseScale * W) / 2;
+  const baseOy = pT + ((CH - pT - pB) - baseScale * H) / 2 + baseScale * H;
+  // 以畫布中心為基準套用 zoom，再加上平移
+  const cx = CW / 2, cy = CH / 2;
+  _scale = baseScale * _zoom;
+  _ox = cx + (baseOx - cx) * _zoom + _panX;
+  _oy = cy + (baseOy - cy) * _zoom + _panY;
 }
 
 const mx = (x) => _ox + x * _scale;
 const my = (y) => _oy - y * _scale;
+
+// 限制平移：室內矩形必須始終覆蓋畫布中心，避免拖到全空白而迷失
+function clampPan() {
+  const CW = canvas.width, CH = canvas.height;
+  setupCoords(CW, CH);
+  const left = mx(0), right = mx(S.room.W);
+  const top = my(S.room.H), bottom = my(0);
+  const cx = CW / 2, cy = CH / 2;
+  if (right < cx) _panX += cx - right; else if (left > cx) _panX += cx - left;
+  if (bottom < cy) _panY += cy - bottom; else if (top > cy) _panY += cy - top;
+  setupCoords(CW, CH);
+}
+
+// 以螢幕點 (sx,sy) 為焦點縮放（焦點下的內容維持不動）
+function zoomAt(sx, sy, factor) {
+  const CW = canvas.width, CH = canvas.height;
+  setupCoords(CW, CH);
+  const wx = (sx - _ox) / _scale, wy = (_oy - sy) / _scale;
+  _zoom = clamp(_zoom * factor, ZOOM_MIN, ZOOM_MAX);
+  if (_zoom === ZOOM_MIN) { _panX = 0; _panY = 0; }
+  setupCoords(CW, CH);
+  _panX += sx - (_ox + wx * _scale);
+  _panY += sy - (_oy - wy * _scale);
+  clampPan();
+  redraw();
+}
+
+function resetView() { _zoom = 1; _panX = 0; _panY = 0; redraw(); }
 
 // ══ 場景結構 ══════════════════════════════════════════════════════
 function buildScene() {
@@ -93,7 +156,27 @@ function buildScene() {
     leftCove:  S.sides.left  ? coveData : null,
     rightCove: S.sides.right ? coveData : null,
     refl: { ...S.refl },
+    wallReflect: { ...S.wallReflect },
   };
+}
+
+// 牆面反射屬性：燈槽範圍內（底板以上的槽後牆）一律照常反射；
+// 燈槽範圍外（底板以下的主牆面）依該側開關決定——關閉時 pass=true（光線完全穿透）。
+function wallProps(scene, side, yi) {
+  const cove = side === 'L' ? scene.leftCove : scene.rightCove;
+  const inCove = cove && yi >= cove.bottomY;
+  if (inCove) return { r: scene.refl.wall, pass: false };
+  const on = side === 'L' ? scene.wallReflect.left : scene.wallReflect.right;
+  return on ? { r: scene.refl.wall, pass: false } : { r: 0, pass: true };
+}
+
+// 牆面薄帶/邊框的可見下緣 y：牆面只在 [回傳值, H] 之間繪製。
+// 反射開啟 → 整面牆（0）；反射關閉 → 僅燈槽範圍內（bottomY），無燈槽則整面消失（H）。
+function wallVisibleBottom(scene, side) {
+  const on = side === 'L' ? scene.wallReflect.left : scene.wallReflect.right;
+  if (on) return 0;
+  const cove = side === 'L' ? scene.leftCove : scene.rightCove;
+  return cove ? cove.bottomY : scene.H;
 }
 
 // ══ 射線交叉計算 ══════════════════════════════════════════════════
@@ -103,10 +186,10 @@ function buildScene() {
  */
 function findHit(ox, oy, dx, dy, scene) {
   const { W, H, refl } = scene;
-  let tMin = Infinity, surf = null, r = 1, horiz = true;
+  let tMin = Infinity, surf = null, r = 1, horiz = true, pass = false;
 
-  const try_ = (t, s, rv, h) => {
-    if (t > 1e-5 && t < tMin) { tMin = t; surf = s; r = rv; horiz = h; }
+  const try_ = (t, s, rv, h, p = false) => {
+    if (t > 1e-5 && t < tMin) { tMin = t; surf = s; r = rv; horiz = h; pass = p; }
   };
 
   // 室內四面
@@ -114,11 +197,11 @@ function findHit(ox, oy, dx, dy, scene) {
   if (dy < 0) try_(-oy / dy,       'floor',   refl.floor, true);
   if (dx < 0) {
     const t = -ox / dx, yi = oy + dy * t;
-    if (yi >= 0 && yi <= H) try_(t, 'wallL', refl.wall, false);
+    if (yi >= 0 && yi <= H) { const w = wallProps(scene, 'L', yi); try_(t, 'wallL', w.r, false, w.pass); }
   }
   if (dx > 0) {
     const t = (W - ox) / dx, yi = oy + dy * t;
-    if (yi >= 0 && yi <= H) try_(t, 'wallR', refl.wall, false);
+    if (yi >= 0 && yi <= H) { const w = wallProps(scene, 'R', yi); try_(t, 'wallR', w.r, false, w.pass); }
   }
 
   // 燈槽結構（左右各一）— 考慮材料厚度
@@ -192,7 +275,7 @@ function findHit(ox, oy, dx, dy, scene) {
   addCove(scene.rightCove, 'R');
 
   if (!surf) return null;
-  return { x: ox + dx * tMin, y: oy + dy * tMin, surf, r, horiz };
+  return { x: ox + dx * tMin, y: oy + dy * tMin, surf, r, horiz, pass };
 }
 
 // ══ 射線繪製 ══════════════════════════════════════════════════════
@@ -227,6 +310,17 @@ function drawRays(scene, side) {
     for (let b = 0; b <= S.ray.bounces; b++) {
       const hit = findHit(cox, coy, cdx, cdy, scene);
       if (!hit) break;
+
+      // 槽外牆面反射關閉 → 光線完全穿透牆面、沿原方向射出室外後結束
+      if (hit.pass) {
+        const far = (scene.W + scene.H) * 3;
+        ctx.beginPath();
+        ctx.moveTo(mx(cox), my(coy));
+        ctx.lineTo(mx(cox + cdx * far), my(coy + cdy * far));
+        ctx.strokeStyle = `rgba(${r8},${g8},${b8},${alpha.toFixed(3)})`;
+        ctx.stroke();
+        break;
+      }
 
       ctx.beginPath();
       ctx.moveTo(mx(cox), my(coy));
@@ -324,6 +418,27 @@ function drawLightDot(scene, side) {
   ctx.beginPath(); ctx.arc(mx(lx), my(ly), 3.5, 0, Math.PI * 2); ctx.fill();
 }
 
+// ── 燈具裸露邊界框（眩光判定範圍）─────────────────────────────────
+function drawGlareBox(scene, side) {
+  const cove = side === 'L' ? scene.leftCove : scene.rightCove;
+  if (!cove) return;
+  const gW = Math.max(0, S.glare.width), gH = Math.max(0, S.glare.height);
+  if (gW <= 0 && gH <= 0) return;
+  const { W } = scene;
+  const { lx, ly } = lightPos(cove, side, W);
+  const { x0, x1, y0, y1 } = glareBox(lx, ly, side);
+  const { r8, g8, b8 } = lightDisplayColor();
+  const px = mx(x0), py = my(y1), pw = (x1 - x0) * _scale, ph = (y1 - y0) * _scale;
+  ctx.save();
+  ctx.fillStyle = `rgba(${r8},${g8},${b8},0.16)`;
+  ctx.fillRect(px, py, pw, ph);
+  ctx.setLineDash([4, 3]);
+  ctx.lineWidth = 1.2;
+  ctx.strokeStyle = `rgba(${r8},${g8},${b8},0.7)`;
+  ctx.strokeRect(px, py, pw, ph);
+  ctx.restore();
+}
+
 // ══ 眩光分析 ══════════════════════════════════════════════════════
 /**
  * 分析單側燈槽在指定眼高的眩光狀況。
@@ -336,6 +451,18 @@ function drawLightDot(scene, side) {
  *   'safeNear'  近牆安全、超過 xGraze 後可見光源
  *   'safeFar'   遠處安全、未達 xGraze 時可見光源
  */
+// 針對單一光源點計算遮蔽狀態（眩光分析核心）
+function analyzePoint(px, py, baffleX, edgeY, eyeH) {
+  const eAbove = eyeH > edgeY;
+  const lAbove = py   > edgeY;
+  if (!eAbove && !lAbove) return { status: 'shielded', xGraze: null };
+  if (eAbove && lAbove)   return { status: 'allGlare', xGraze: null };
+  // 光源恰好齊平遮擋邊緣：掠射線水平 → 全區可見
+  if (Math.abs(edgeY - py) < 1e-6) return { status: 'allGlare', xGraze: null };
+  const t = (eyeH - py) / (edgeY - py);
+  return { status: lAbove ? 'safeNear' : 'safeFar', xGraze: px + t * (baffleX - px) };
+}
+
 function analyzeSide(cove, side, W, eyeH) {
   const { depth, bottomY, baffleEnabled, baffleHeight, thick } = cove;
   const { lx: lightX, ly: lightY } = lightPos(cove, side, W);
@@ -348,21 +475,35 @@ function analyzeSide(cove, side, W, eyeH) {
     : (side === 'L' ? depth : W - depth);
   const edgeY = hasBaffle ? bottomY + baffleHeight : bottomY;
 
-  const eAbove = eyeH   > edgeY;
-  const lAbove = lightY > edgeY;
+  // 燈具裸露邊界：矩形範圍，基準角（光源所在角）可設定。
+  // 把光源視為一個矩形範圍，眩光取「最易被看見」的角（眩光區最大）作為判定。
+  const box = glareBox(lightX, lightY, side);
+  const corners = [
+    { x: box.x0, y: box.y0 }, { x: box.x1, y: box.y0 },
+    { x: box.x0, y: box.y1 }, { x: box.x1, y: box.y1 },
+  ];
+  // allGlare / shielded 時的繪圖代表點取矩形中心
+  const rep = { x: (box.x0 + box.x1) / 2, y: (box.y0 + box.y1) / 2 };
 
-  if (!eAbove && !lAbove)
-    return { status: 'shielded', lightX, lightY, baffleX, baffleTop: edgeY, xGraze: null };
-  if (eAbove && lAbove)
-    return { status: 'allGlare', lightX, lightY, baffleX, baffleTop: edgeY, xGraze: null };
+  let anyAll = false, best = null, bestCorner = null;
+  for (const c of corners) {
+    const r = analyzePoint(c.x, c.y, baffleX, edgeY, eyeH);
+    if (r.status === 'allGlare') { anyAll = true; continue; }
+    if (r.status === 'shielded') continue;
+    // 取「眩光區最大（最裸露）」的臨界角。眩光條件依 side/status 不同，
+    // 較小 xGraze 較裸露者：左側 safeNear、右側 safeFar；其餘較大 xGraze 較裸露。
+    if (!best) { best = r; bestCorner = c; continue; }
+    const smallerWorse = (side === 'L' && r.status === 'safeNear') ||
+                         (side === 'R' && r.status === 'safeFar');
+    const worse = smallerWorse ? (r.xGraze < best.xGraze) : (r.xGraze > best.xGraze);
+    if (worse) { best = r; bestCorner = c; }
+  }
 
-  // 光源恰好齊平遮擋邊緣：掠射線水平，光源位於遮蔽邊界，視為全區可見
-  if (Math.abs(edgeY - lightY) < 1e-6)
-    return { status: 'allGlare', lightX, lightY, baffleX, baffleTop: edgeY, xGraze: null };
-
-  const t = (eyeH - lightY) / (edgeY - lightY);
-  const xGraze = lightX + t * (baffleX - lightX);
-  return { status: lAbove ? 'safeNear' : 'safeFar', lightX, lightY, baffleX, baffleTop: edgeY, xGraze };
+  if (anyAll)
+    return { status: 'allGlare', lightX: rep.x, lightY: rep.y, baffleX, baffleTop: edgeY, xGraze: null, box };
+  if (!best)
+    return { status: 'shielded', lightX: rep.x, lightY: rep.y, baffleX, baffleTop: edgeY, xGraze: null, box };
+  return { status: best.status, lightX: bestCorner.x, lightY: bestCorner.y, baffleX, baffleTop: edgeY, xGraze: best.xGraze, box };
 }
 
 // ══ 眼睛視角 / 安全距離 ═══════════════════════════════════════════
@@ -376,7 +517,7 @@ function drawEye(scene) {
   // 眼高水平虛線
   ctx.save();
   ctx.setLineDash([5, 6]);
-  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+  ctx.strokeStyle = theme().eyeLine;
   ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(mx(0), ey); ctx.lineTo(mx(W), ey); ctx.stroke();
   ctx.restore();
@@ -507,28 +648,32 @@ function redraw() {
   const scene = buildScene();
   const { W, H } = scene;
 
-  // 背景
-  ctx.fillStyle = '#0d1015';
+  // 背景（依主題）
+  ctx.fillStyle = theme().bg;
   ctx.fillRect(0, 0, CW, CH);
 
-  // 室內底色
-  ctx.fillStyle = '#161e24';
-  ctx.fillRect(mx(0), my(H), W * _scale, H * _scale);
-
-  // 表面薄帶
+  // 表面薄帶（一律畫在室外側，使反射發生在材料的室內表面、不被射線穿透）
   const st = Math.max(3, 0.022 * _scale);
   ctx.fillStyle = 'rgba(215,210,195,0.65)';
-  ctx.fillRect(mx(0), my(H), W * _scale, st);              // 天花板
+  ctx.fillRect(mx(0), my(H) - st, W * _scale, st);         // 天花板（畫在 y=H 之上）
   ctx.fillStyle = 'rgba(150,130,100,0.55)';
-  ctx.fillRect(mx(0), my(0) - st, W * _scale, st);         // 地板
+  ctx.fillRect(mx(0), my(0), W * _scale, st);              // 地板（畫在 y=0 之下）
+  // 牆面薄帶：反射關閉時，燈槽範圍外的牆面消失（只保留燈槽範圍內）
+  const lWallBot = wallVisibleBottom(scene, 'L');
+  const rWallBot = wallVisibleBottom(scene, 'R');
   ctx.fillStyle = 'rgba(185,185,185,0.45)';
-  ctx.fillRect(mx(0) - st, my(H), st, H * _scale);         // 左牆
-  ctx.fillRect(mx(W),      my(H), st, H * _scale);         // 右牆
+  if (lWallBot < H) ctx.fillRect(mx(0) - st, my(H), st, (H - lWallBot) * _scale);  // 左牆
+  if (rWallBot < H) ctx.fillRect(mx(W),      my(H), st, (H - rWallBot) * _scale);  // 右牆
 
-  // 室內邊框
-  ctx.strokeStyle = '#3a4248';
+  // 室內邊框（牆面消失處不畫邊線）
+  ctx.strokeStyle = theme().border;
   ctx.lineWidth = 1;
-  ctx.strokeRect(mx(0), my(H), W * _scale, H * _scale);
+  ctx.beginPath();
+  ctx.moveTo(mx(0), my(H)); ctx.lineTo(mx(W), my(H));     // 天花板
+  ctx.moveTo(mx(0), my(0)); ctx.lineTo(mx(W), my(0));     // 地板
+  if (lWallBot < H) { ctx.moveTo(mx(0), my(H)); ctx.lineTo(mx(0), my(lWallBot)); }  // 左牆
+  if (rWallBot < H) { ctx.moveTo(mx(W), my(H)); ctx.lineTo(mx(W), my(rWallBot)); }  // 右牆
+  ctx.stroke();
 
   // 燈槽幾何
   drawCoveGeo(scene, 'L');
@@ -541,6 +686,10 @@ function redraw() {
   // 射線（最主要的視覺元素）
   drawRays(scene, 'L');
   drawRays(scene, 'R');
+
+  // 燈具裸露邊界框（眩光判定範圍）
+  drawGlareBox(scene, 'L');
+  drawGlareBox(scene, 'R');
 
   // 光源光暈（蓋在射線之上）
   drawLightDot(scene, 'L');
@@ -628,6 +777,8 @@ bindSlider('room-height', 'room-height-val', 'mm', 0, v => { S.room.H = v / 1000
 bindSlider('refl-ceiling', 'refl-ceiling-val', '', 2, v => { S.refl.ceiling = v; });
 bindSlider('refl-wall',    'refl-wall-val',    '', 2, v => { S.refl.wall    = v; });
 bindSlider('refl-floor',   'refl-floor-val',   '', 2, v => { S.refl.floor   = v; });
+document.getElementById('wall-refl-left').addEventListener('change',  e => { S.wallReflect.left  = e.target.checked; redraw(); });
+document.getElementById('wall-refl-right').addEventListener('change', e => { S.wallReflect.right = e.target.checked; redraw(); });
 
 // 燈槽（光源相關）
 document.getElementById('side-left').addEventListener('change',  e => { S.sides.left  = e.target.checked; redraw(); });
@@ -646,9 +797,90 @@ bindSlider('ray-density',  'ray-density-val',  '條', 0, v => { S.ray.density  =
 bindSlider('ray-bounces',  'ray-bounces-val',  '次', 0, v => { S.ray.bounces  = v; });
 
 // 視角
+document.getElementById('theme-light').addEventListener('change', e => { S.theme = e.target.checked ? 'light' : 'dark'; redraw(); });
 document.getElementById('eye-show').addEventListener('change', e => { S.eye.show = e.target.checked; redraw(); });
 bindSlider('eye-height', 'eye-height-val', 'mm', 0, v => { S.eye.height = v / 1000; });
 bindSlider('eye-x',      'eye-x-val',      '', 2,  v => { S.eye.xRatio = v; });
+bindSlider('glare-width',  'glare-width-val',  'mm', 0, v => { S.glare.width  = v / 1000; });
+bindSlider('glare-height', 'glare-height-val', 'mm', 0, v => { S.glare.height = v / 1000; });
+document.getElementById('glare-hanchor').addEventListener('change', e => { S.glare.hAnchor = e.target.value; redraw(); });
+document.getElementById('glare-vanchor').addEventListener('change', e => { S.glare.vAnchor = e.target.value; redraw(); });
+
+// ══ 縮放 / 平移互動 ═══════════════════════════════════════════════
+canvas.style.cursor = 'grab';
+const _vpScale = () => { const r = canvas.getBoundingClientRect(); return canvas.width / (r.width || 1); };
+
+// 滾輪縮放（以游標為焦點）
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const k = canvas.width / (rect.width || 1);
+  const sx = (e.clientX - rect.left) * k, sy = (e.clientY - rect.top) * k;
+  zoomAt(sx, sy, e.deltaY < 0 ? 1.12 : 1 / 1.12);
+}, { passive: false });
+
+// 滑鼠拖曳平移
+let _dragging = false, _lastX = 0, _lastY = 0;
+canvas.addEventListener('mousedown', (e) => {
+  _dragging = true; _lastX = e.clientX; _lastY = e.clientY; canvas.style.cursor = 'grabbing';
+});
+window.addEventListener('mousemove', (e) => {
+  if (!_dragging) return;
+  const k = _vpScale();
+  _panX += (e.clientX - _lastX) * k; _panY += (e.clientY - _lastY) * k;
+  _lastX = e.clientX; _lastY = e.clientY;
+  clampPan(); redraw();
+});
+window.addEventListener('mouseup', () => { _dragging = false; canvas.style.cursor = 'grab'; });
+
+// 觸控：單指平移、雙指縮放
+let _touchMode = null, _tLastX = 0, _tLastY = 0, _tStartDist = 0, _tStartZoom = 1;
+const _touchDist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+canvas.addEventListener('touchstart', (e) => {
+  if (e.touches.length === 1) {
+    _touchMode = 'pan'; _tLastX = e.touches[0].clientX; _tLastY = e.touches[0].clientY;
+  } else if (e.touches.length === 2) {
+    _touchMode = 'pinch'; _tStartDist = _touchDist(e.touches) || 1; _tStartZoom = _zoom;
+  }
+}, { passive: false });
+canvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const k = canvas.width / (rect.width || 1);
+  if (_touchMode === 'pan' && e.touches.length === 1) {
+    _panX += (e.touches[0].clientX - _tLastX) * k;
+    _panY += (e.touches[0].clientY - _tLastY) * k;
+    _tLastX = e.touches[0].clientX; _tLastY = e.touches[0].clientY;
+    clampPan(); redraw();
+  } else if (_touchMode === 'pinch' && e.touches.length === 2) {
+    const d = _touchDist(e.touches);
+    const mpx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+    const mpy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+    const sx = (mpx - rect.left) * k, sy = (mpy - rect.top) * k;
+    const target = clamp(_tStartZoom * (d / _tStartDist), ZOOM_MIN, ZOOM_MAX);
+    zoomAt(sx, sy, target / _zoom);
+  }
+}, { passive: false });
+canvas.addEventListener('touchend', (e) => { if (e.touches.length === 0) _touchMode = null; });
+
+// 縮放按鈕
+const _vpCenter = () => ({ x: canvas.width / 2, y: canvas.height / 2 });
+document.getElementById('zoom-in').addEventListener('click',    () => { const c = _vpCenter(); zoomAt(c.x, c.y, 1.25); });
+document.getElementById('zoom-out').addEventListener('click',   () => { const c = _vpCenter(); zoomAt(c.x, c.y, 0.8);  });
+document.getElementById('zoom-reset').addEventListener('click', resetView);
+
+// ══ 手機版：底部設定面板收合 ═════════════════════════════════════
+const _panel = document.getElementById('panel');
+const _mqMobile = window.matchMedia('(max-width: 820px)');
+document.getElementById('panel-header').addEventListener('click', () => {
+  if (_mqMobile.matches) _panel.classList.toggle('collapsed');
+});
+function applyMobileDefault() {
+  // 進入手機版預設收合，讓使用者先看到模擬畫面
+  _panel.classList.toggle('collapsed', _mqMobile.matches);
+}
+_mqMobile.addEventListener('change', () => { applyMobileDefault(); resizeCanvas(); });
+applyMobileDefault();
 
 // ══ 初始化 ════════════════════════════════════════════════════════
 resizeCanvas();
