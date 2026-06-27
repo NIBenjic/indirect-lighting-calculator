@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>間接照明剖面模擬器</title>
+  <title>間接照明模擬器</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -70,6 +70,20 @@
     #panel-body::-webkit-scrollbar { width: 4px; }
     #panel-body::-webkit-scrollbar-track { background: #1a1a1a; }
     #panel-body::-webkit-scrollbar-thumb { background: #444; border-radius: 2px; }
+    #panel-footer {
+      padding: 7px 14px;
+      background: #1e1e1e;
+      border-top: 1px solid #333;
+      text-align: center;
+      letter-spacing: .2px;
+      user-select: none;
+      line-height: 1.5;
+    }
+    #panel-footer .pf-app { font-size: 11px; color: #9a9a9a; font-weight: 600; }
+    #panel-footer .pf-ver { font-size: 10px; color: #6a6a6a; font-weight: 400; }
+    #panel-footer .pf-by  { font-size: 10px; color: #6a6a6a; }
+    #panel-footer a { color: #6a6a6a; text-decoration: none; }
+    #panel-footer a:hover { color: #4fc3f7; text-decoration: underline; }
 
     .tab-content { display: none; }
     .tab-content.active { display: block; }
@@ -223,6 +237,18 @@
     .toggle input:checked + .toggle-slider { background: #4fc3f7; }
     .toggle input:checked + .toggle-slider::before { transform: translateX(16px); }
 
+    .illum-result {
+      background: #1a1a1a;
+      border: 1px solid #2e2e2e;
+      border-radius: 5px;
+      padding: 8px 10px;
+      font-size: 12px;
+      color: #cfd2d6;
+      line-height: 1.7;
+    }
+    .illum-result .lux-big { font-size: 20px; font-weight: 700; color: #ffd24a; }
+    .illum-result .sub { font-size: 11px; color: #8a949c; }
+
     .legend-block {
       font-size: 11px;
       color: #666;
@@ -272,6 +298,20 @@
     #zoom-controls button:hover  { background: rgba(79,195,247,0.25); color: #fff; }
     #zoom-controls button:active { background: rgba(79,195,247,0.40); }
 
+    /* ── 全域儲存失敗橫幅 ── */
+    #storage-banner {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 50;
+      background: #5a2424;
+      color: #ffd7d7;
+      border-bottom: 1px solid #7a3a3a;
+      font-size: 12px;
+      text-align: center;
+      padding: 6px 12px;
+    }
+    #storage-banner[hidden] { display: none; }
+
     /* ── Mobile: 底部浮動收合設定面板 ── */
     @media (max-width: 820px) {
       body { flex-direction: column; }
@@ -296,19 +336,24 @@
 </head>
 <body>
 
+  <!-- 全域提示：本機儲存失敗（配額/隱私模式） -->
+  <div id="storage-banner" role="alert" hidden>⚠ 本機儲存不可用（配額或隱私模式），本次變更不會保留</div>
+
   <!-- Control Panel -->
   <aside id="panel">
-    <div id="panel-header"><span>間接照明剖面模擬器</span><span id="panel-toggle" aria-hidden="true">▾</span></div>
-    <div id="panel-tabs">
-      <button class="tab-btn active" data-tab="space">空間</button>
-      <button class="tab-btn" data-tab="cove">燈槽</button>
-      <button class="tab-btn" data-tab="light">光源</button>
-      <button class="tab-btn" data-tab="view">視角</button>
+    <div id="panel-header"><span>間接照明模擬器</span><span id="panel-toggle" aria-hidden="true">▾</span></div>
+    <div id="panel-tabs" role="tablist" aria-label="設定分頁">
+      <button class="tab-btn active" data-tab="io"    id="tabbtn-io"    role="tab" aria-controls="tab-io"    aria-selected="true">設定檔</button>
+      <button class="tab-btn"        data-tab="space" id="tabbtn-space" role="tab" aria-controls="tab-space" aria-selected="false">空間</button>
+      <button class="tab-btn"        data-tab="cove"  id="tabbtn-cove"  role="tab" aria-controls="tab-cove"  aria-selected="false">燈槽</button>
+      <button class="tab-btn"        data-tab="light" id="tabbtn-light" role="tab" aria-controls="tab-light" aria-selected="false">光源</button>
+      <button class="tab-btn"        data-tab="view"  id="tabbtn-view"  role="tab" aria-controls="tab-view"  aria-selected="false">視角</button>
+      <button class="tab-btn"        data-tab="illum" id="tabbtn-illum" role="tab" aria-controls="tab-illum" aria-selected="false">照度</button>
     </div>
     <div id="panel-body">
 
       <!-- ── Tab: Space ── -->
-      <div class="tab-content active" id="tab-space">
+      <div class="tab-content" id="tab-space" role="tabpanel" aria-labelledby="tabbtn-space">
         <div class="section">
           <div class="section-title">空間尺寸</div>
           <div class="control-row">
@@ -352,10 +397,10 @@
       </div>
 
       <!-- ── Tab: Cove ── -->
-      <div class="tab-content" id="tab-cove">
+      <div class="tab-content" id="tab-cove" role="tabpanel" aria-labelledby="tabbtn-cove">
         <!-- 1. 模板列表 -->
         <div class="section">
-          <div class="section-title">模板列表（存於本機）</div>
+          <div class="section-title">燈槽模板列表（存於本機）</div>
           <div class="control-row">
             <span class="control-label">名稱</span>
             <input type="text" id="lib-name" class="text-input" placeholder="模板名稱">
@@ -374,24 +419,12 @@
           <div class="hint" id="lib-status"></div>
         </div>
 
-        <!-- 2. 進階：匯入／匯出模板（預設收合）-->
-        <details class="section">
-          <summary class="section-title" style="cursor:pointer">進階：匯入／匯出模板</summary>
-          <div class="btn-row">
-            <button id="profile-export" class="btn">匯出 JSON</button>
-            <button id="profile-import" class="btn">匯入套用</button>
-          </div>
-          <textarea id="profile-json" class="text-area" rows="5" placeholder="燈槽模板 JSON（按「匯出 JSON」顯示於此並複製；貼上後按「匯入套用」）"></textarea>
-          <div class="hint">幾何相對於燈槽尺寸、非室高；匯入到不同室高時，燈槽絕對位置與眩光結果會改變。</div>
-          <div class="hint" id="profile-status"></div>
-        </details>
-
-        <!-- 3. 模板元件編輯 -->
+        <!-- 2. 模板元件編輯 -->
         <div class="section">
           <div id="cove-editor"></div>
         </div>
 
-        <!-- 4. 啟用側別 -->
+        <!-- 3. 啟用側別 -->
         <div class="section">
           <div class="section-title">啟用側別</div>
           <div class="toggle-row">
@@ -403,17 +436,10 @@
             <label class="toggle"><input type="checkbox" id="side-right" checked><span class="toggle-slider"></span></label>
           </div>
         </div>
-
-        <!-- 5. 從範本開始 -->
-        <div class="section">
-          <div class="section-title">從範本開始</div>
-          <div class="btn-row wrap" id="cove-templates"></div>
-          <div class="hint">範本只是起點；建立後即可自由增刪元件、編輯頂點、設定材質。</div>
-        </div>
       </div>
 
       <!-- ── Tab: Light ── -->
-      <div class="tab-content" id="tab-light">
+      <div class="tab-content" id="tab-light" role="tabpanel" aria-labelledby="tabbtn-light">
         <div class="section">
           <div class="section-title">光源模板列表（存於本機）</div>
           <div class="control-row">
@@ -432,11 +458,11 @@
             <button id="light-lib-delete" class="btn">刪除</button>
           </div>
           <div class="hint" id="light-lib-status"></div>
-          <div class="hint">模板僅儲存「光源形式」（發光角度／自體旋轉／色溫／亮度）。</div>
+          <div class="hint">模板儲存光學參數（掛點／發光角度／自體旋轉）與示意設定（色溫／亮度）。</div>
         </div>
 
         <div class="section">
-          <div class="section-title">光源掛點（於燈槽內）</div>
+          <div class="section-title">光學參數（影響照度）</div>
           <div class="control-row">
             <span class="control-label">距牆 u</span>
             <input type="number" id="fixture-u" class="num-input" step="1">
@@ -447,11 +473,7 @@
             <input type="number" id="fixture-d" class="num-input" step="1">
             <span class="unit-label">mm</span>
           </div>
-          <div class="hint">可直接在此分頁的畫布上拖曳橙色把手調整位置。</div>
-        </div>
-
-        <div class="section">
-          <div class="section-title">光源形式</div>
+          <div class="hint">光源掛點（於燈槽內）；可直接在此分頁的畫布上拖曳橙色把手調整位置。</div>
           <div class="control-row">
             <span class="control-label">發光角度</span>
             <input type="range" id="emission-angle" min="10" max="360" step="1" value="180">
@@ -462,24 +484,21 @@
             <input type="range" id="rotation-angle" min="-180" max="180" step="5" value="0">
             <span class="control-value" id="rotation-angle-val">0°</span>
           </div>
+          <div class="hint">※ 照度計算的亮度請至「照度」分頁設定燈帶光通量（lm/m）。</div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">示意設定（僅影響畫面，不計入照度）</div>
           <div class="control-row">
             <span class="control-label">色溫</span>
             <input type="range" id="light-kelvin" min="2700" max="6500" step="100" value="3000">
             <span class="control-value" id="light-kelvin-val">3000 K</span>
           </div>
           <div class="control-row">
-            <span class="control-label">光源亮度</span>
+            <span class="control-label">示意亮度</span>
             <input type="range" id="light-intensity" min="100" max="2000" step="50" value="800">
             <span class="control-value" id="light-intensity-val">800</span>
           </div>
-        </div>
-
-      </div>
-
-      <!-- ── Tab: View ── -->
-      <div class="tab-content" id="tab-view">
-        <div class="section">
-          <div class="section-title">射線設定（模擬顯示）</div>
           <div class="control-row">
             <span class="control-label">射線密度</span>
             <input type="range" id="ray-density" min="4" max="5000" step="2" value="20">
@@ -487,11 +506,16 @@
           </div>
           <div class="control-row">
             <span class="control-label">反射次數</span>
-            <input type="range" id="ray-bounces" min="0" max="6" step="1" value="3">
-            <span class="control-value" id="ray-bounces-val">3 次</span>
+            <input type="range" id="ray-bounces" min="0" max="6" step="1" value="1">
+            <span class="control-value" id="ray-bounces-val">1 次</span>
           </div>
+          <div class="hint">色溫只改變畫面色彩；示意亮度／射線密度／反射次數只影響光線示意圖，皆不計入照度估算。</div>
         </div>
 
+      </div>
+
+      <!-- ── Tab: View ── -->
+      <div class="tab-content" id="tab-view" role="tabpanel" aria-labelledby="tabbtn-view">
         <div class="section">
           <div class="section-title">背景</div>
           <div class="toggle-row">
@@ -520,6 +544,7 @@
 
         <div class="section">
           <div class="section-title">眩光偵測（燈具裸露邊界）</div>
+          <div class="hint">在此分頁時，可直接於畫布上拖曳邊框把手調整大小。</div>
           <div class="control-row">
             <span class="control-label">邊界寬</span>
             <input type="range" id="glare-width" min="0" max="500" step="5" value="80">
@@ -572,16 +597,107 @@
         </div>
       </div>
 
+      <!-- ── Tab: 照度（指定點估算）── -->
+      <div class="tab-content" id="tab-illum" role="tabpanel" aria-labelledby="tabbtn-illum">
+        <div class="section">
+          <div class="section-title">指定點照度估算</div>
+          <div class="hint">在此分頁時，於畫布上點選（可拖曳）即可放置量測點。</div>
+          <div class="control-row">
+            <span class="control-label">燈帶光通量</span>
+            <input type="number" id="illum-lm" class="num-input" step="50" min="0">
+            <span class="unit-label">lm/m</span>
+          </div>
+          <div class="hint">此值決定照度計算的亮度；「光源」分頁的「示意亮度」僅影響畫面、不影響此計算。</div>
+          <div class="control-row">
+            <span class="control-label">發光分佈</span>
+            <select id="illum-dist" class="select-input">
+              <option value="lambert">Lambertian（餘弦）</option>
+              <option value="uniform">均勻</option>
+            </select>
+          </div>
+          <div class="control-row">
+            <span class="control-label">受光面朝向</span>
+            <select id="illum-normal" class="select-input">
+              <option value="up">水平朝上（工作面）</option>
+              <option value="down">水平朝下</option>
+              <option value="left">垂直朝左</option>
+              <option value="right">垂直朝右</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">估算結果</div>
+          <div id="illum-result" class="illum-result">尚未放置量測點</div>
+          <div class="hint">間接光以 2D 輻射度法計算全部漫射反射（收斂解，與「反射次數」設定無關）。</div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">假設與限制</div>
+          <div class="hint">本估算假設：燈帶沿進深方向無限長且均勻（直接光為線光源 1/距離 衰減）、所有表面為完全漫射、無家具/人/端部效應。需輸入真實燈帶 lm/m 才有實際 lux 意義；「光源」分頁的「示意亮度」僅影響視覺。</div>
+          <div class="hint">結果為上述假設下的近似值，<strong>非</strong> DIALux／Relux／AGi32 等 3D 光學工具的替代品；適合做相對比較與粗估。</div>
+        </div>
+      </div>
+
+      <!-- ── Tab: 設定檔（光源＋燈槽合併）── -->
+      <div class="tab-content active" id="tab-io" role="tabpanel" aria-labelledby="tabbtn-io">
+        <!-- 1. 設定檔列表 -->
+        <div class="section">
+          <div class="section-title">設定檔列表（存於本機）</div>
+          <div class="control-row">
+            <span class="control-label">名稱</span>
+            <input type="text" id="setup-name" class="text-input" placeholder="設定檔名稱">
+          </div>
+          <div class="btn-row">
+            <button id="setup-save" class="btn">儲存</button>
+            <button id="setup-saveas" class="btn">另存新檔</button>
+          </div>
+          <div class="control-row">
+            <select id="setup-select" class="select-input"></select>
+          </div>
+          <div class="btn-row">
+            <button id="setup-load" class="btn">載入</button>
+            <button id="setup-delete" class="btn">刪除</button>
+          </div>
+          <div class="hint" id="setup-status"></div>
+          <div class="hint">設定檔同時包含燈槽形式與光源形式（含掛點位置）。</div>
+        </div>
+
+        <!-- 2. 從範本開始 -->
+        <div class="section">
+          <div class="section-title">從範本開始</div>
+          <div class="btn-row wrap" id="cove-templates"></div>
+          <div class="hint">範本只是起點；建立後可至「燈槽」分頁自由增刪元件、編輯頂點、設定材質。</div>
+        </div>
+
+        <!-- 3. 匯入／匯出設定碼 -->
+        <div class="section">
+          <div class="section-title">匯入／匯出設定碼</div>
+          <div class="btn-row">
+            <button id="io-export" class="btn">匯出</button>
+            <button id="io-import" class="btn">匯入套用</button>
+          </div>
+          <textarea id="io-json" class="text-area" rows="8" placeholder="光源＋燈槽設定碼（按「匯出」顯示於此並複製；貼上後按「匯入套用」）"></textarea>
+          <div class="hint">匯出為精簡設定碼（ILS1 開頭、單行、壓縮編碼）；體積較小但不可讀。匯入同時相容此設定碼與一般 JSON。</div>
+          <div class="hint">燈槽幾何相對於燈槽尺寸、非室高；匯入到不同室高時，絕對位置與眩光結果會改變。亦可匯入舊版「僅燈槽」JSON（schema：cove-form@2），此時光源設定維持不變。</div>
+          <div class="hint" id="io-status"></div>
+        </div>
+      </div>
+
     </div><!-- end panel-body -->
+    <div id="panel-footer">
+      <div class="pf-app">間接照明模擬器 <span class="pf-ver">v2.0</span></div>
+      <div class="pf-by">By <a href="mailto:tyy@richhonour.com">Ben Yang</a> · <a href="https://www.richhonour.com" target="_blank" rel="noopener">Richhonour</a></div>
+    </div>
   </aside>
 
   <!-- Main 2D Canvas -->
   <main id="viewport">
-    <canvas id="main-canvas"></canvas>
+    <canvas id="main-canvas" role="img" aria-label="間接照明剖面模擬圖（光線、燈槽、照度）"></canvas>
     <div id="zoom-controls">
-      <button id="zoom-in"  title="放大">＋</button>
-      <button id="zoom-out" title="縮小">－</button>
-      <button id="zoom-reset" title="重設視圖">⟲</button>
+      <button id="zoom-in"  title="放大" aria-label="放大">＋</button>
+      <button id="zoom-out" title="縮小" aria-label="縮小">－</button>
+      <button id="zoom-reset" title="重設視圖" aria-label="重設視圖">⟲</button>
     </div>
   </main>
 
