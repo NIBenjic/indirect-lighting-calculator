@@ -2244,7 +2244,15 @@ function nudgeSelected(du, dd) {
   clearTimeout(_nudgeTimer); _nudgeTimer = setTimeout(() => { _nudgeActive = false; renderCoveEditor(); }, 600);
   const mv = (p) => { p.u = clamp(p.u + du, -0.05, S.room.W); p.d = clamp(p.d + dd, 0, S.room.H); };
   if (el.path.kind === 'arc') mv(el.path.center);
-  else { el.path.points.forEach(mv); propagateElementJoints(el.id); }   // 相黏夥伴跟著移動
+  else {
+    el.path.points.forEach(mv);
+    // 相黏夥伴整串「剛體平移」跟隨（同位移、不被拉拽變形）
+    for (const id of bondedComponentIncluding(el.id)) {
+      if (id === el.id) continue;
+      const pe = S.cove.form.elements.find(x => x.id === id);
+      if (pe && pe.path && pe.path.kind !== 'arc') pe.path.points.forEach(mv);
+    }
+  }
   redraw();
   return true;
 }
