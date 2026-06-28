@@ -248,6 +248,15 @@
     }
     .illum-result .lux-big { font-size: 20px; font-weight: 700; color: #ffd24a; }
     .illum-result .sub { font-size: 11px; color: #8a949c; }
+    .illum-result .illum-pt { position: relative; padding: 4px 0; }
+    .illum-result .illum-pt + .illum-pt { border-top: 1px solid #2e2e2e; margin-top: 4px; }
+    .illum-del {
+      position: absolute; top: 4px; right: 0; width: 18px; height: 18px; line-height: 1;
+      background: #2a2f36; border: 1px solid #3a4048; color: #cfd2d6;
+      font-size: 11px; border-radius: 4px; cursor: pointer; padding: 0;
+    }
+    .illum-del:hover { border-color: #ff8a8a; color: #fff; }
+    .btn.active { background: #1f6feb; border-color: #4fc3f7; color: #fff; }
 
     .legend-block {
       font-size: 11px;
@@ -601,7 +610,11 @@
       <div class="tab-content" id="tab-illum" role="tabpanel" aria-labelledby="tabbtn-illum">
         <div class="section">
           <div class="section-title">指定點照度估算</div>
-          <div class="hint">在此分頁時，於畫布上點選（可拖曳）即可放置量測點。</div>
+          <div class="hint">按「放置量測點」後在畫布點擊新增點（可連續放置多個）；拖曳量測點可移動，拖曳空白可平移畫面；再按一次結束放置。</div>
+          <div class="btn-row">
+            <button id="illum-place" class="btn" type="button">＋ 放置量測點</button>
+            <button id="illum-clear" class="btn" type="button">清除全部</button>
+          </div>
           <div class="control-row">
             <span class="control-label">燈帶光通量</span>
             <input type="number" id="illum-lm" class="num-input" step="50" min="0">
