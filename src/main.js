@@ -2395,7 +2395,7 @@ function dragMove(sx, sy, mod) {
     if (dragState.kind === 'glareW' || dragState.kind === 'glareH' || dragState.kind === 'glareWH') {
       const wx = (sx - _ox) / _scale, wy = (_oy - sy) / _scale;
       const fxp = S.cove.light.fixture, lw = toWorld(fxp.u, fxp.d, dragState.side, S.room.W, S.room.H);
-      const snapC = v => clamp(Math.round(Math.max(0, v) / 0.005) * 0.005, 0, 0.5);   // 對齊滑桿 0~500mm / 5mm，夾在 0 以上
+      const snapC = v => clamp(Math.round(Math.max(0, v) / 0.001) * 0.001, 0, 0.5);   // 對齊滑桿 0~500mm / 1mm，夾在 0 以上
       // 以把手所在邊的「朝外符號」(sH/sV) 取帶號距離（越過光源原點即夾回 0，避免反彈）；置中基準為對稱故 ×2
       if (dragState.sH) S.glare.width  = snapC((wx - lw.x) * dragState.sH * (S.glare.hAnchor === 'center' ? 2 : 1));
       if (dragState.sV) S.glare.height = snapC((wy - lw.y) * dragState.sV * (S.glare.vAnchor === 'center' ? 2 : 1));
