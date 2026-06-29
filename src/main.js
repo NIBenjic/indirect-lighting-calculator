@@ -937,8 +937,9 @@ function analyzePoint(px, py, baffleX, edgeY, eyeH) {
   const lAbove = py   > edgeY;
   if (!eAbove && !lAbove) return { status: 'shielded', xGraze: null };
   if (eAbove && lAbove)   return { status: 'allGlare', xGraze: null };
-  // 光源恰好齊平遮擋邊緣：掠射線水平 → 全區可見
-  if (Math.abs(edgeY - py) < 1e-6) return { status: 'allGlare', xGraze: null };
+  // 光源恰好齊平遮擋邊緣：掠射線水平。眼高在邊緣上方→全區可見；在下方→完全遮蔽。
+  // （此時 lAbove 僅因浮點誤差而與 eAbove 不一致，須以眼高為準，否則會誤判全區可見。）
+  if (Math.abs(edgeY - py) < 1e-6) return { status: eAbove ? 'allGlare' : 'shielded', xGraze: null };
   const t = (eyeH - py) / (edgeY - py);
   return { status: lAbove ? 'safeNear' : 'safeFar', xGraze: px + t * (baffleX - px) };
 }
