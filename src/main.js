@@ -1642,8 +1642,9 @@ function validateSetupObj(obj) {
 // 解析設定碼 → { ok, error, setup, sections }；sections 為實際包含的區段鍵
 function parseSetup(text) {
   let obj;
-  try { obj = JSON.parse(text); } catch (e) { return { ok:false, error:'JSON 格式錯誤：' + e.message }; }
-  if (!obj || typeof obj !== 'object') return { ok:false, error:'不是有效的 JSON 物件' };
+  if (!text || !text.trim()) return { ok:false, error:'設定碼是空的' };
+  try { obj = JSON.parse(text); } catch (e) { console.error('[匯入] 設定碼解析失敗：', e); return { ok:false, error:'設定碼格式不正確，請確認已完整複製貼上' }; }
+  if (!obj || typeof obj !== 'object') return { ok:false, error:'設定碼格式不正確' };
   if (obj.schema === 'cove-setup@2') {
     if (obj.cove != null) { const cv = parseForm(JSON.stringify(obj.cove)); if (!cv.ok) return { ok:false, error:'燈槽：' + cv.error }; obj.cove = cv.form; }
     const lv = validateSetupObj(obj); if (!lv.ok) return lv;
@@ -1725,7 +1726,7 @@ document.getElementById('io-export').addEventListener('click', async () => {
   try {
     out = _hasCompression ? await encodeCompact(serializeSetup(sel))
                           : JSON.stringify(serializeSetup(sel));   // 後備：瀏覽器無壓縮 API → 最小化 JSON
-  } catch (e) { st.textContent = '✗ 匯出失敗：' + e.message; st.className = 'hint error'; return; }
+  } catch (e) { console.error('[匯出] 失敗：', e); st.textContent = '✗ 匯出失敗，請稍後再試'; st.className = 'hint error'; return; }
   document.getElementById('io-json').value = out;
   const note = _hasCompression ? '' : '（瀏覽器不支援壓縮，已輸出最小化 JSON）';
   if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -1736,9 +1737,11 @@ document.getElementById('io-export').addEventListener('click', async () => {
 });
 document.getElementById('io-import').addEventListener('click', async () => {
   const st = document.getElementById('io-status');
+  const raw = document.getElementById('io-json').value;
+  if (!raw || !raw.trim()) { st.textContent = '✗ 請先在上方貼上設定碼再按「匯入套用」'; st.className = 'hint error'; return; }
   let text;
-  try { text = await resolveImportText(document.getElementById('io-json').value); }
-  catch (e) { st.textContent = '✗ 解壓縮失敗（格式錯誤？）：' + e.message; st.className = 'hint error'; return; }
+  try { text = await resolveImportText(raw); }
+  catch (e) { console.error('[匯入] 解壓縮失敗：', e); st.textContent = '✗ 設定碼格式不正確，請確認已完整複製貼上'; st.className = 'hint error'; return; }
   const res = parseSetup(text);
   if (!res.ok) { st.textContent = '✗ ' + res.error; st.className = 'hint error'; return; }
   const sel = readSetupSelection();
