@@ -171,6 +171,9 @@
     .hint { font-size: 10px; color: #7c858d; margin-top: 4px; line-height: 1.4; }
     .hint.error { color: #ff8a8a; }
     .hint.ok { color: #7dd87d; }
+    .setup-inc { display: grid; grid-template-columns: 1fr 1fr; gap: 3px 10px; margin: 4px 0 8px; }
+    .setup-inc label { font-size: 11px; color: #cfd2d6; display: flex; align-items: center; gap: 5px; cursor: pointer; }
+    .setup-inc input { margin: 0; cursor: pointer; }
     /* ── 燈槽形式編輯器 ── */
     .btn-row.wrap { flex-wrap: wrap; }
     .tmpl-btn { flex: 0 0 auto; }
@@ -673,7 +676,7 @@
             <button id="setup-delete" class="btn">刪除</button>
           </div>
           <div class="hint" id="setup-status"></div>
-          <div class="hint">設定檔同時包含燈槽形式與光源形式（含掛點位置）。</div>
+          <div class="hint">設定檔會完整保存目前所有設定（燈槽、光源、空間、視角、射線、照度量測點）；載入時全部還原。</div>
         </div>
 
         <!-- 2. 從範本開始 -->
@@ -686,13 +689,22 @@
         <!-- 3. 匯入／匯出設定碼 -->
         <div class="section">
           <div class="section-title">匯入／匯出設定碼</div>
+          <div class="hint">包含項目（控制匯出與匯入套用的範圍）：</div>
+          <div class="setup-inc">
+            <label><input type="checkbox" id="setup-inc-cove" checked> 燈槽形式</label>
+            <label><input type="checkbox" id="setup-inc-light" checked> 光源</label>
+            <label><input type="checkbox" id="setup-inc-space" checked> 空間（尺寸/側別/反射）</label>
+            <label><input type="checkbox" id="setup-inc-view" checked> 視角（眼睛/眩光/主題）</label>
+            <label><input type="checkbox" id="setup-inc-ray" checked> 射線</label>
+            <label><input type="checkbox" id="setup-inc-illum" checked> 照度量測點</label>
+          </div>
           <div class="btn-row">
             <button id="io-export" class="btn">匯出</button>
             <button id="io-import" class="btn">匯入套用</button>
           </div>
-          <textarea id="io-json" class="text-area" rows="8" placeholder="光源＋燈槽設定碼（按「匯出」顯示於此並複製；貼上後按「匯入套用」）"></textarea>
-          <div class="hint">匯出為精簡設定碼（ILS1 開頭、單行、壓縮編碼）；體積較小但不可讀。匯入同時相容此設定碼與一般 JSON。</div>
-          <div class="hint">燈槽幾何相對於燈槽尺寸、非室高；匯入到不同室高時，絕對位置與眩光結果會改變。亦可匯入舊版「僅燈槽」JSON（schema：cove-form@2），此時光源設定維持不變。</div>
+          <textarea id="io-json" class="text-area" rows="8" placeholder="設定碼（按「匯出」顯示於此並複製；貼上後按「匯入套用」）。匯出/匯入內容依上方勾選項目決定。"></textarea>
+          <div class="hint">匯出為精簡設定碼（ILS1 開頭、單行、壓縮編碼）；體積較小但不可讀。匯入同時相容此設定碼與一般 JSON。只會套用「設定碼含有且上方有勾選」的項目。</div>
+          <div class="hint">燈槽幾何相對於燈槽尺寸、非室高；匯入到不同室高時，絕對位置與眩光結果會改變。亦相容舊版設定碼（cove-setup@1：燈槽＋光源）與「僅燈槽」JSON（cove-form@2）。</div>
           <div class="hint" id="io-status"></div>
         </div>
       </div>

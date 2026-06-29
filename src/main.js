@@ -1609,32 +1609,54 @@ function renderTemplateButtons() {
   });
 }
 
-// ══ 匯入/匯出：光源＋燈槽合併 JSON（獨立分頁）═══════════════════════
-// 合併格式 cove-setup@1：同時帶燈槽形式（cove-form@2）與光源形式（含掛點）。
-function serializeSetup() {
-  return {
-    schema: 'cove-setup@1',
-    originRoomH: Math.round(S.room.H * 1000),     // 非規範註記：匯出時室高(mm)，供人對照
-    cove: serializeForm(),
-    light: JSON.parse(JSON.stringify(S.cove.light)),
-  };
+// ══ 匯入/匯出：可選擇性包含各項設定（獨立分頁）═══════════════════════
+// 格式 cove-setup@2：依勾選帶入燈槽/光源/空間/視角/射線/照度各區段；相容舊版 @1（燈槽＋光源）與純燈槽。
+const SETUP_SECTIONS = [
+  { key: 'cove',  label: '燈槽形式' },
+  { key: 'light', label: '光源' },
+  { key: 'space', label: '空間（尺寸／側別／反射／穿透）' },
+  { key: 'view',  label: '視角（眼睛／眩光／主題／圖例）' },
+  { key: 'ray',   label: '射線' },
+  { key: 'illum', label: '照度量測點' },
+];
+const ALL_SECTIONS = SETUP_SECTIONS.reduce((o, s) => (o[s.key] = true, o), {});
+const secLabel = (k) => { const s = SETUP_SECTIONS.find(x => x.key === k); return s ? s.label : k; };
+const cloneJSON = (v) => JSON.parse(JSON.stringify(v));
+// 依勾選(sel)組出設定碼物件；未勾選的區段不納入
+function serializeSetup(sel = ALL_SECTIONS) {
+  const o = { schema: 'cove-setup@2', originRoomH: Math.round(S.room.H * 1000) };   // originRoomH：匯出時室高(mm)，供人對照
+  if (sel.cove)  o.cove  = serializeForm();
+  if (sel.light) o.light = cloneJSON(S.cove.light);
+  if (sel.space) o.space = { room: cloneJSON(S.room), sides: cloneJSON(S.sides), refl: cloneJSON(S.refl), wallReflect: cloneJSON(S.wallReflect) };
+  if (sel.view)  o.view  = { eye: cloneJSON(S.eye), glare: cloneJSON(S.glare), theme: S.theme, legendShow: S.legendShow };
+  if (sel.ray)   o.ray   = cloneJSON(S.ray);
+  if (sel.illum) o.illum = { lmPerM: S.illum.lmPerM, dist: S.illum.dist, normal: S.illum.normal, points: S.illum.points.map(p => ({ x: p.x, y: p.y })) };
+  return o;
 }
-// 解析合併 JSON → { ok, error, form, light }；light 為 null 表示僅燈槽（舊格式）
+// 驗證設定碼物件中「有出現」的燈槽/光源區段；其餘區段交由 sanitizeState 夾制
+function validateSetupObj(obj) {
+  if (obj.cove != null) { const v = validateForm(obj.cove); if (!v.ok) return { ok:false, error:'燈槽：' + v.error }; }
+  if (obj.light != null) { const v = validateLight(obj.light); if (!v.ok) return { ok:false, error:'光源：' + v.error }; }
+  return { ok:true };
+}
+// 解析設定碼 → { ok, error, setup, sections }；sections 為實際包含的區段鍵
 function parseSetup(text) {
   let obj;
   try { obj = JSON.parse(text); } catch (e) { return { ok:false, error:'JSON 格式錯誤：' + e.message }; }
   if (!obj || typeof obj !== 'object') return { ok:false, error:'不是有效的 JSON 物件' };
-  if (obj.schema === 'cove-setup@1') {
-    const cv = parseForm(JSON.stringify(obj.cove));
-    if (!cv.ok) return { ok:false, error:'燈槽：' + cv.error };
-    const lv = validateLight(obj.light);
-    if (!lv.ok) return { ok:false, error: lv.error };
-    return { ok:true, form: cv.form, light: obj.light };
+  if (obj.schema === 'cove-setup@2') {
+    if (obj.cove != null) { const cv = parseForm(JSON.stringify(obj.cove)); if (!cv.ok) return { ok:false, error:'燈槽：' + cv.error }; obj.cove = cv.form; }
+    const lv = validateSetupObj(obj); if (!lv.ok) return lv;
+    return { ok:true, setup: obj, sections: SETUP_SECTIONS.map(s => s.key).filter(k => obj[k] != null) };   // 忽略 null 區段
   }
-  // 舊版：僅燈槽（cove-form@2 / cove-profile@1）
-  const cv = parseForm(text);
+  if (obj.schema === 'cove-setup@1') {   // 舊版：燈槽＋光源
+    const cv = parseForm(JSON.stringify(obj.cove)); if (!cv.ok) return { ok:false, error:'燈槽：' + cv.error };
+    const lv = validateLight(obj.light); if (!lv.ok) return { ok:false, error: lv.error };
+    return { ok:true, setup: { cove: cv.form, light: obj.light }, sections: ['cove', 'light'] };
+  }
+  const cv = parseForm(text);   // 更舊：純燈槽（cove-form@2 / cove-profile@1）
   if (!cv.ok) return cv;
-  return { ok:true, form: cv.form, light: null };
+  return { ok:true, setup: { cove: cv.form }, sections: ['cove'] };
 }
 function applyLight(L) {
   S.cove.light.emissionAngle  = Number(L.emissionAngle);
@@ -1642,6 +1664,49 @@ function applyLight(L) {
   S.cove.light.lightKelvin    = Number(L.lightKelvin);
   S.cove.light.lightIntensity = Number(L.lightIntensity);
   S.cove.light.fixture = { u: Number(L.fixture.u), d: Number(L.fixture.d) };
+}
+// 套用設定碼物件中「有出現且被勾選」的區段；回傳已套用區段的中文標籤
+function applySetup(obj, sel) {
+  const applied = [];
+  if (sel.cove && obj.cove !== undefined) { activeFormName = null; savedFormJson = null; applyForm(cloneJSON(obj.cove)); applied.push(secLabel('cove')); }
+  if (sel.light && obj.light !== undefined) { applyLight(obj.light); activeLightName = null; savedLightJson = null; applied.push(secLabel('light')); }
+  if (sel.space && obj.space) {
+    const sp = obj.space;
+    if (sp.room) Object.assign(S.room, sp.room);
+    if (sp.sides) Object.assign(S.sides, sp.sides);
+    if (sp.refl) Object.assign(S.refl, sp.refl);
+    if (sp.wallReflect) Object.assign(S.wallReflect, sp.wallReflect);
+    applied.push(secLabel('space'));
+  }
+  if (sel.view && obj.view) {
+    const v = obj.view;
+    if (v.eye) Object.assign(S.eye, v.eye);
+    if (v.glare) Object.assign(S.glare, v.glare);
+    if (typeof v.theme === 'string') S.theme = v.theme;
+    if (typeof v.legendShow === 'boolean') S.legendShow = v.legendShow;
+    applied.push(secLabel('view'));
+  }
+  if (sel.ray && obj.ray) { Object.assign(S.ray, obj.ray); applied.push(secLabel('ray')); }
+  if (sel.illum && obj.illum) {
+    const il = obj.illum;
+    if (isFinite(Number(il.lmPerM))) S.illum.lmPerM = Number(il.lmPerM);
+    if (typeof il.dist === 'string') S.illum.dist = il.dist;
+    if (typeof il.normal === 'string') S.illum.normal = il.normal;
+    if (Array.isArray(il.points)) S.illum.points = il.points.filter(p => p && isFinite(Number(p.x)) && isFinite(Number(p.y))).map(p => ({ x: Number(p.x), y: Number(p.y), result: null }));
+    applied.push(secLabel('illum'));
+  }
+  sanitizeState();                                   // 夾制套用值至合法範圍
+  syncAllControls(); syncLightControls(); syncFixtureControls();
+  if (typeof renderIllumResult === 'function') renderIllumResult();   // 刷新照度面板（含套用後量測點清空的情形）
+  if (typeof updateIllumPlaceBtn === 'function') updateIllumPlaceBtn();   // 放置模式已被 sanitize 關閉→同步按鈕外觀
+  renderLightLib(); renderLibrary(); redraw();
+  return applied;
+}
+// 讀取「包含項目」勾選狀態（控制匯出/匯入；預設全選）
+function readSetupSelection() {
+  const sel = {};
+  for (const s of SETUP_SECTIONS) { const el = document.getElementById('setup-inc-' + s.key); sel[s.key] = el ? el.checked : true; }
+  return sel;
 }
 // 精簡格式 ILS1：JSON → UTF-8 → deflate-raw → base64，加前綴。可讀性換取體積（約少 6~8 成）。
 const _hasCompression = (typeof CompressionStream === 'function' && typeof DecompressionStream === 'function');
@@ -1654,10 +1719,12 @@ async function resolveImportText(raw) {
 }
 document.getElementById('io-export').addEventListener('click', async () => {
   const st = document.getElementById('io-status');
+  const sel = readSetupSelection();
+  if (!Object.values(sel).some(Boolean)) { st.textContent = '✗ 請至少勾選一個要匯出的項目'; st.className = 'hint error'; return; }
   let out;
   try {
-    out = _hasCompression ? await encodeCompact(serializeSetup())
-                          : JSON.stringify(serializeSetup());   // 後備：瀏覽器無壓縮 API → 最小化 JSON
+    out = _hasCompression ? await encodeCompact(serializeSetup(sel))
+                          : JSON.stringify(serializeSetup(sel));   // 後備：瀏覽器無壓縮 API → 最小化 JSON
   } catch (e) { st.textContent = '✗ 匯出失敗：' + e.message; st.className = 'hint error'; return; }
   document.getElementById('io-json').value = out;
   const note = _hasCompression ? '' : '（瀏覽器不支援壓縮，已輸出最小化 JSON）';
@@ -1674,33 +1741,41 @@ document.getElementById('io-import').addEventListener('click', async () => {
   catch (e) { st.textContent = '✗ 解壓縮失敗（格式錯誤？）：' + e.message; st.className = 'hint error'; return; }
   const res = parseSetup(text);
   if (!res.ok) { st.textContent = '✗ ' + res.error; st.className = 'hint error'; return; }
-  activeFormName = null; savedFormJson = null;   // 匯入＝新草稿
-  applyForm(res.form);
-  let msg = '✓ 已匯入並套用光源＋燈槽';
-  if (res.light) {
-    applyLight(res.light);
-    activeLightName = null; savedLightJson = null;   // 匯入光源＝未命名
-  } else {
-    msg = '✓ 已匯入並套用燈槽（光源維持不變）';
+  const sel = readSetupSelection();
+  const applicable = res.sections.filter(k => sel[k]);
+  if (!applicable.length) {
+    st.textContent = '✗ 設定碼含：' + res.sections.map(secLabel).join('、') + '，但未勾選相符項目';
+    st.className = 'hint error'; return;
   }
-  sanitizeState();                                 // 夾制匯入的光源/掛點等數值至合法範圍
-  if (res.light) { syncLightControls(); renderLightLib(); }
+  const applied = applySetup(res.setup, sel);
   activeSetupName = null; savedSetupJson = null;   // 匯入＝未命名設定檔
-  syncFixtureControls(); renderSetupLib(); redraw();
+  renderSetupLib();
+  const skipped = res.sections.filter(k => !sel[k]);
+  let msg = '✓ 已匯入並套用：' + applied.join('、');
+  if (skipped.length) msg += '（略過未勾選：' + skipped.map(secLabel).join('、') + '）';
   st.textContent = msg; st.className = 'hint ok';
 });
 
 // ── 設定檔列表（光源＋燈槽合併，與燈槽/光源模板平行）──────────────────
 const LS_SETUP_LIB = 'indirect-lighting:setup-library@1';
 let activeSetupName = null, savedSetupJson = null;
-const setupPayload = () => ({ cove: JSON.parse(JSON.stringify(S.cove.form)), light: JSON.parse(JSON.stringify(S.cove.light)) });
+const setupPayload = () => serializeSetup(ALL_SECTIONS);   // 列表儲存完整快照（含所有設定區段）
+// 目前狀態是否已偏離作用中設定檔（只比對該設定檔實際含有的區段，兼容舊 @1）
+function setupDirtyVsSaved() {
+  if (!savedSetupJson) return false;
+  let stored; try { stored = JSON.parse(savedSetupJson); } catch (e) { return true; }
+  const cur = setupPayload();
+  // cove 比對忽略 originRoomH 註記（舊版列表項未含此欄，避免誤判已修改）
+  const norm = (key, v) => { if (key === 'cove' && v && typeof v === 'object') { const c = { ...v }; delete c.originRoomH; return JSON.stringify(c); } return JSON.stringify(v); };
+  return SETUP_SECTIONS.some(s => stored[s.key] !== undefined && norm(s.key, stored[s.key]) !== norm(s.key, cur[s.key]));
+}
 function loadSetupLib() { try { const r = localStorage.getItem(LS_SETUP_LIB); const d = r ? JSON.parse(r) : null; return (d && Array.isArray(d.setups)) ? d.setups : []; } catch (e) { return []; } }
 function saveSetupLib(setups) { try { localStorage.setItem(LS_SETUP_LIB, JSON.stringify({ schema: 'setup-library@1', setups })); _storageFailed = false; updateStorageBanner(); return true; } catch (e) { _storageFailed = true; updateStorageBanner(); updateSetupStatus(); return false; } }
 function updateSetupStatus() {
   const st = document.getElementById('setup-status'); if (!st) return;
   if (_storageFailed) { st.textContent = '⚠ 本機儲存不可用，本次變更不會保留'; st.className = 'hint error'; return; }
   if (activeSetupName) {
-    const dirty = JSON.stringify(setupPayload()) !== savedSetupJson;
+    const dirty = setupDirtyVsSaved();
     st.textContent = dirty ? `目前：${activeSetupName}（已修改，未儲存）` : `目前：${activeSetupName}（已同步）`;
     st.className = dirty ? 'hint' : 'hint ok';
   } else { st.textContent = '未命名設定檔（按「儲存」存入設定檔列表）'; st.className = 'hint'; }
@@ -1731,20 +1806,17 @@ function setupSave() { if (!activeSetupName) { setupSaveAs(); return; } document
 function setupLoad() {
   const st = document.getElementById('setup-status');
   const name = document.getElementById('setup-select').value;
-  const s = loadSetupLib().find(x => x.name === name); if (!s) return;
-  const cv = validateForm(s.setup && s.setup.cove);
-  if (!cv.ok) { st.textContent = '✗ 燈槽資料毀損：' + cv.error; st.className = 'hint error'; return; }
-  const lv = validateLight(s.setup.light);
-  if (!lv.ok) { st.textContent = '✗ 光源資料毀損：' + lv.error; st.className = 'hint error'; return; }
-  // 載入設定檔＝覆蓋燈槽與光源；個別模板關聯皆轉為未命名（不再對應單一模板）
-  activeFormName = null; savedFormJson = null;
-  applyForm(JSON.parse(JSON.stringify(s.setup.cove)));
-  applyLight(s.setup.light);
-  sanitizeState();                                 // 夾制載入值至合法範圍
-  activeLightName = null; savedLightJson = null;
-  syncLightControls(); syncFixtureControls(); renderLightLib(); renderLibrary();
-  activeSetupName = name; savedSetupJson = JSON.stringify(setupPayload());
+  const s = loadSetupLib().find(x => x.name === name); if (!s || !s.setup) return;
+  const v = validateSetupObj(s.setup);
+  if (!v.ok) { st.textContent = '✗ 資料毀損：' + v.error; st.className = 'hint error'; return; }
+  // 載入設定檔＝還原其包含的所有區段；個別模板關聯轉為未命名（不再對應單一模板）
+  const applied = applySetup(s.setup, ALL_SECTIONS);
+  activeSetupName = name;
+  // dirty 基準取「套用並夾制後」的目前值（僅該設定檔含有的區段），避免 sanitize 夾制造成載入後即誤判已修改
+  const presentSel = {}; SETUP_SECTIONS.forEach(x => { if (s.setup[x.key] != null) presentSel[x.key] = true; });
+  savedSetupJson = JSON.stringify(serializeSetup(presentSel));
   document.getElementById('setup-name').value = name; renderSetupLib(); redraw();
+  st.textContent = '✓ 已載入：' + applied.join('、'); st.className = 'hint ok';
 }
 function setupDelete() {
   const name = document.getElementById('setup-select').value; if (!name) return;
@@ -1784,6 +1856,7 @@ function saveSession() {
     _storageFailed = false;
   } catch (e) { _storageFailed = true; updateLibraryStatus(); if (typeof updateLightStatus === 'function') updateLightStatus(); } // 配額/隱私模式
   updateStorageBanner();
+  if (typeof updateSetupStatus === 'function') updateSetupStatus();   // 任何變更後刷新設定檔「已修改」指示（設定檔含全部設定）
 }
 let _saveTimer = null;
 function scheduleSave() { clearTimeout(_saveTimer); _saveTimer = setTimeout(saveSession, 400); }
